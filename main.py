@@ -28,29 +28,42 @@ async def wallet(address: str):
         root_stake_tao = 0.0
         subnet_map = {}
 
+        # Inspect first record's fields for debugging
+        debug_fields = []
+        if stake_info:
+            obj = stake_info[0]
+            debug_fields = [f for f in dir(obj) if not f.startswith('_')]
+
         for info in stake_info:
             netuid = int(info.netuid)
 
-            # v10 SDK: stake field is a Balance object
-            # Try multiple field patterns for alpha amount
-            try:
-                alpha_amount = float(info.stake)
-            except:
-                alpha_amount = 0.0
-
-            # TAO equivalent value — try stake_as_tao first, fall back to tao_value
-            tao_value = 0.0
-            for field in ['stake_as_tao', 'tao_value', 'value']:
+            # alpha amount — the raw stake on this subnet
+            alpha_amount = 0.0
+            for field in ['stake', 'alpha', 'amount']:
                 val = getattr(info, field, None)
                 if val is not None:
                     try:
-                        tao_value = float(val)
-                        if tao_value > 0:
+                        alpha_amount = float(val)
+                        if alpha_amount > 0:
+                            break
+                    except:
+                        pass
+
+            # tao equivalent — try every known field name in SDK v10
+            tao_value = 0.0
+            for field in ['tao', 'tao_value', 'stake_as_tao', 'value_as_tao', 'tao_worth']:
+                val = getattr(info, field, None)
+                if val is not None:
+                    try:
+                        tv = float(val)
+                        if tv > 0:
+                            tao_value = tv
                             break
                     except:
                         pass
 
             if netuid == 0:
+                # Root stake — alpha_amount IS tao for netuid 0
                 root_stake_tao += tao_value if tao_value > 0 else alpha_amount
             elif alpha_amount > 0.000001:
                 if netuid not in subnet_map:
@@ -59,13 +72,23 @@ async def wallet(address: str):
                         "name": f"SN{netuid}",
                         "alphaTotal": 0.0,
                         "taoTotal": 0.0,
-                        "validators": []
                     }
                 subnet_map[netuid]["alphaTotal"] += alpha_amount
                 subnet_map[netuid]["taoTotal"] += tao_value
-                hotkey = str(getattr(info, 'hotkey_ss58', '') or '')
-                if hotkey and len(hotkey) > 8:
-                    subnet_map[netuid]["validators"].append(hotkey[:8] + "…")
+
+        # For subnets where taoTotal is still 0, try sim_swap to get TAO value
+        for netuid, s in subnet_map.items():
+            if s["taoTotal"] == 0.0 and s["alphaTotal"] > 0:
+                try:
+                    result = sub.sim_swap(
+                        netuid=netuid,
+                        amount=bt.Balance.from_tao(s["alphaTotal"]),
+                        is_buy=False  # selling alpha → TAO
+                    )
+                    if result and float(result) > 0:
+                        s["taoTotal"] = float(result)
+                except:
+                    pass
 
         alpha_positions = []
         for netuid, s in subnet_map.items():
@@ -76,16 +99,10 @@ async def wallet(address: str):
                 "alphaAmount": round(s["alphaTotal"], 6),
                 "alphaPriceTao": round(price_tao, 8),
                 "taoValue": round(s["taoTotal"], 6),
-                "validators": list(set(s["validators"]))
+                "validators": []
             })
 
-        # Sort by TAO value descending
         alpha_positions.sort(key=lambda x: x["taoValue"], reverse=True)
-
-        # Debug: log first stake_info fields to help diagnose taoValue=0 issue
-        debug_fields = []
-        if stake_info:
-            debug_fields = [f for f in dir(stake_info[0]) if not f.startswith('_')]
 
         return {
             "ok": True,
@@ -98,7 +115,7 @@ async def wallet(address: str):
                 "source": "subtensor-onchain",
                 "stakeRecords": len(stake_info),
                 "alphaSubnets": len(alpha_positions),
-                "stakeInfoFields": debug_fields[:15]  # first 15 field names for diagnosis
+                "stakeInfoFields": debug_fields[:20]
             }
         }
 
