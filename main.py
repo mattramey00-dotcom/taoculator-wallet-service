@@ -1,19 +1,10 @@
-import os
-import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import bittensor as bt
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
-
-# Read-only subtensor connection — no wallet, no keys, just chain queries
 subtensor = None
 
 def get_subtensor():
@@ -32,9 +23,6 @@ async def wallet(address: str):
         raise HTTPException(status_code=400, detail="Invalid SS58 address")
     try:
         sub = get_subtensor()
-
-        # get_stake_info_for_coldkey returns all stakes for this coldkey across all subnets
-        # This is a single batch chain call — no rate limits, no API key needed
         stake_info = sub.get_stake_info_for_coldkey(coldkey_ss58=address)
 
         root_stake_tao = 0.0
@@ -42,10 +30,25 @@ async def wallet(address: str):
 
         for info in stake_info:
             netuid = int(info.netuid)
-            # stake is a Balance object — .tao gives TAO float value
-            alpha_amount = float(info.stake.tao) if hasattr(info.stake, 'tao') else float(info.stake)
-            # tao_value = alpha converted to TAO equivalent
-            tao_value = float(info.stake_as_tao.tao) if hasattr(info, 'stake_as_tao') and hasattr(info.stake_as_tao, 'tao') else 0.0
+
+            # v10 SDK: stake field is a Balance object
+            # Try multiple field patterns for alpha amount
+            try:
+                alpha_amount = float(info.stake)
+            except:
+                alpha_amount = 0.0
+
+            # TAO equivalent value — try stake_as_tao first, fall back to tao_value
+            tao_value = 0.0
+            for field in ['stake_as_tao', 'tao_value', 'value']:
+                val = getattr(info, field, None)
+                if val is not None:
+                    try:
+                        tao_value = float(val)
+                        if tao_value > 0:
+                            break
+                    except:
+                        pass
 
             if netuid == 0:
                 root_stake_tao += tao_value if tao_value > 0 else alpha_amount
@@ -60,33 +63,42 @@ async def wallet(address: str):
                     }
                 subnet_map[netuid]["alphaTotal"] += alpha_amount
                 subnet_map[netuid]["taoTotal"] += tao_value
-                hotkey = str(info.hotkey_ss58) if hasattr(info, 'hotkey_ss58') else ""
-                if hotkey:
+                hotkey = str(getattr(info, 'hotkey_ss58', '') or '')
+                if hotkey and len(hotkey) > 8:
                     subnet_map[netuid]["validators"].append(hotkey[:8] + "…")
 
         alpha_positions = []
         for netuid, s in subnet_map.items():
-            alpha_price_tao = s["taoTotal"] / s["alphaTotal"] if s["alphaTotal"] > 0 else 0
+            price_tao = s["taoTotal"] / s["alphaTotal"] if s["alphaTotal"] > 0 and s["taoTotal"] > 0 else 0.0
             alpha_positions.append({
                 "netuid": netuid,
                 "name": s["name"],
-                "alphaAmount": s["alphaTotal"],
-                "alphaPriceTao": alpha_price_tao,
-                "taoValue": s["taoTotal"],
+                "alphaAmount": round(s["alphaTotal"], 6),
+                "alphaPriceTao": round(price_tao, 8),
+                "taoValue": round(s["taoTotal"], 6),
                 "validators": list(set(s["validators"]))
             })
+
+        # Sort by TAO value descending
+        alpha_positions.sort(key=lambda x: x["taoValue"], reverse=True)
+
+        # Debug: log first stake_info fields to help diagnose taoValue=0 issue
+        debug_fields = []
+        if stake_info:
+            debug_fields = [f for f in dir(stake_info[0]) if not f.startswith('_')]
 
         return {
             "ok": True,
             "address": address,
-            "taoBalance": 0.0,  # free balance requires separate System.Account query
-            "rootStake": root_stake_tao,
-            "totalTao": root_stake_tao,
+            "taoBalance": 0.0,
+            "rootStake": round(root_stake_tao, 6),
+            "totalTao": round(root_stake_tao, 6),
             "alphaPositions": alpha_positions,
             "_debug": {
                 "source": "subtensor-onchain",
                 "stakeRecords": len(stake_info),
-                "alphaSubnets": len(alpha_positions)
+                "alphaSubnets": len(alpha_positions),
+                "stakeInfoFields": debug_fields[:15]  # first 15 field names for diagnosis
             }
         }
 
