@@ -26,80 +26,70 @@ async def wallet(address: str):
         stake_info = sub.get_stake_info_for_coldkey(coldkey_ss58=address)
 
         root_stake_tao = 0.0
-        subnet_map = {}
-
-        # Inspect first record's fields for debugging
-        debug_fields = []
-        if stake_info:
-            obj = stake_info[0]
-            debug_fields = [f for f in dir(obj) if not f.startswith('_')]
+        subnet_map = {}  # netuid -> {alphaTotal, hotkeys}
 
         for info in stake_info:
             netuid = int(info.netuid)
-
-            # alpha amount — the raw stake on this subnet
-            alpha_amount = 0.0
-            for field in ['stake', 'alpha', 'amount']:
-                val = getattr(info, field, None)
-                if val is not None:
-                    try:
-                        alpha_amount = float(val)
-                        if alpha_amount > 0:
-                            break
-                    except:
-                        pass
-
-            # tao equivalent — try every known field name in SDK v10
-            tao_value = 0.0
-            for field in ['tao', 'tao_value', 'stake_as_tao', 'value_as_tao', 'tao_worth']:
-                val = getattr(info, field, None)
-                if val is not None:
-                    try:
-                        tv = float(val)
-                        if tv > 0:
-                            tao_value = tv
-                            break
-                    except:
-                        pass
+            # SDK v10: 'stake' field is a Balance object, float() gives TAO value
+            try:
+                alpha_amount = float(info.stake)
+            except:
+                alpha_amount = 0.0
 
             if netuid == 0:
-                # Root stake — alpha_amount IS tao for netuid 0
-                root_stake_tao += tao_value if tao_value > 0 else alpha_amount
+                root_stake_tao += alpha_amount
             elif alpha_amount > 0.000001:
                 if netuid not in subnet_map:
-                    subnet_map[netuid] = {
-                        "netuid": netuid,
-                        "name": f"SN{netuid}",
-                        "alphaTotal": 0.0,
-                        "taoTotal": 0.0,
-                    }
+                    subnet_map[netuid] = {"alphaTotal": 0.0, "hotkey": str(getattr(info, "hotkey_ss58", ""))}
                 subnet_map[netuid]["alphaTotal"] += alpha_amount
-                subnet_map[netuid]["taoTotal"] += tao_value
 
-        # For subnets where taoTotal is still 0, try sim_swap to get TAO value
-        for netuid, s in subnet_map.items():
-            if s["taoTotal"] == 0.0 and s["alphaTotal"] > 0:
-                try:
-                    result = sub.sim_swap(
-                        netuid=netuid,
-                        amount=bt.Balance.from_tao(s["alphaTotal"]),
-                        is_buy=False  # selling alpha → TAO
-                    )
-                    if result and float(result) > 0:
-                        s["taoTotal"] = float(result)
-                except:
-                    pass
-
+        # Get pool data to calculate TAO values
+        # Use dtao pool endpoint via subtensor query for each subnet
         alpha_positions = []
+        sim_errors = []
+
         for netuid, s in subnet_map.items():
-            price_tao = s["taoTotal"] / s["alphaTotal"] if s["alphaTotal"] > 0 and s["taoTotal"] > 0 else 0.0
+            alpha_amount = s["alphaTotal"]
+            tao_value = 0.0
+            price_tao = 0.0
+
+            try:
+                # Query the subnet pool to get alpha_in and tao_in reserves
+                # Then use constant-product AMM formula: tao_out = tao_in * alpha_in / (alpha_in + alpha_amount) ... 
+                # Actually use get_subnet_info or query SubnetInfo
+                pool_result = sub.substrate.query(
+                    module="SubtensorModule",
+                    storage_function="SubnetAlphaIn",
+                    params=[netuid]
+                )
+                tao_result = sub.substrate.query(
+                    module="SubtensorModule",
+                    storage_function="SubnetTaoIn",
+                    params=[netuid]
+                )
+                
+                if pool_result and tao_result:
+                    alpha_in = float(pool_result.value) / 1e9  # rao to TAO
+                    tao_in = float(tao_result.value) / 1e9
+                    
+                    if alpha_in > 0 and tao_in > 0:
+                        # Spot price: tao per alpha
+                        price_tao = tao_in / alpha_in
+                        # AMM output (constant product): dy = y * dx / (x + dx)
+                        # but spot price is close enough for display
+                        tao_value = alpha_amount * price_tao
+            except Exception as e:
+                sim_errors.append(f"SN{netuid}: {str(e)[:50]}")
+                tao_value = 0.0
+                price_tao = 0.0
+
             alpha_positions.append({
                 "netuid": netuid,
-                "name": s["name"],
-                "alphaAmount": round(s["alphaTotal"], 6),
+                "name": f"SN{netuid}",
+                "alphaAmount": round(alpha_amount, 6),
                 "alphaPriceTao": round(price_tao, 8),
-                "taoValue": round(s["taoTotal"], 6),
-                "validators": []
+                "taoValue": round(tao_value, 6),
+                "validators": [s["hotkey"][:10] + "…"] if s["hotkey"] else []
             })
 
         alpha_positions.sort(key=lambda x: x["taoValue"], reverse=True)
@@ -112,10 +102,10 @@ async def wallet(address: str):
             "totalTao": round(root_stake_tao, 6),
             "alphaPositions": alpha_positions,
             "_debug": {
-                "source": "subtensor-onchain",
+                "source": "subtensor-onchain-pool",
                 "stakeRecords": len(stake_info),
                 "alphaSubnets": len(alpha_positions),
-                "stakeInfoFields": debug_fields[:20]
+                "simErrors": sim_errors[:5]
             }
         }
 
