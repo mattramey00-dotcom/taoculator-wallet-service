@@ -77,26 +77,37 @@ async def wallet(address: str):
 async def subnet_identity(netuid: int):
     try:
         sub = get_subtensor()
-        result = sub.substrate.query(
-            module="SubtensorModule",
-            storage_function="SubnetIdentity",
-            params=[netuid]
-        )
-        if result is None or result.value is None:
-            return {"ok": True, "netuid": netuid, "logo_url": None, "name": None}
-
-        val = result.value
-        # SubnetIdentity returns a struct with name, logo_url, etc.
         logo_url = None
         name = None
-        if isinstance(val, dict):
-            logo_url = val.get("logo_url") or val.get("image_url") or val.get("icon_url")
-            name = val.get("subnet_name") or val.get("name")
-        elif hasattr(val, "logo_url"):
-            logo_url = str(val.logo_url) if val.logo_url else None
-            name = str(val.subnet_name) if hasattr(val, "subnet_name") else None
+        raw_val = None
 
-        return {"ok": True, "netuid": netuid, "logo_url": logo_url, "name": name, "raw": str(val)[:200]}
+        # Try V3, V2, V1 in order
+        for storage_fn in ['SubnetIdentitiesV3', 'SubnetIdentitiesV2', 'SubnetIdentities']:
+            try:
+                result = sub.substrate.query(
+                    module="SubtensorModule",
+                    storage_function=storage_fn,
+                    params=[netuid]
+                )
+                if result is not None and result.value is not None:
+                    val = result.value
+                    raw_val = str(val)[:300]
+                    if isinstance(val, dict):
+                        logo_url = (val.get("logo_url") or val.get("image_url") or
+                                   val.get("icon_url") or val.get("logo") or "")
+                        name = (val.get("subnet_name") or val.get("name") or
+                               val.get("subnetName") or "")
+                    break
+            except Exception:
+                continue
+
+        return {
+            "ok": True,
+            "netuid": netuid,
+            "logo_url": logo_url or None,
+            "name": name or None,
+            "raw": raw_val
+        }
 
     except Exception as e:
         return {"ok": True, "netuid": netuid, "logo_url": None, "name": None, "error": str(e)[:100]}
