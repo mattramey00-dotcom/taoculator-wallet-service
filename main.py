@@ -73,6 +73,19 @@ async def wallet(address: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def decode_field(val):
+    """Convert byte array or string to decoded string."""
+    if val is None:
+        return None
+    if isinstance(val, (list, tuple)):
+        try:
+            return bytes(val).decode('utf-8').strip('\x00').strip() or None
+        except:
+            return None
+    if isinstance(val, str):
+        return val.strip() or None
+    return str(val).strip() or None
+
 @app.get("/subnet-identity/{netuid}")
 async def subnet_identity(netuid: int):
     try:
@@ -83,7 +96,6 @@ async def subnet_identity(netuid: int):
             params=[netuid]
         )
 
-        # SubnetIdentitiesV3 returns a dict directly, not a ScaleType with .value
         raw = None
         if result is not None:
             if isinstance(result, dict):
@@ -94,21 +106,16 @@ async def subnet_identity(netuid: int):
                 raw = result.serialize()
 
         if raw is None:
-            return {"ok": True, "netuid": netuid, "logo_url": None, "name": None, "raw": str(result)[:200]}
+            return {"ok": True, "netuid": netuid, "logo_url": None, "name": None}
 
-        logo_url = (raw.get("logo_url") or raw.get("image_url") or
-                    raw.get("icon_url") or raw.get("logo") or
-                    raw.get("logoUrl") or "")
-        name = (raw.get("subnet_name") or raw.get("name") or
-                raw.get("subnetName") or raw.get("SubnetName") or "")
+        logo_url = decode_field(raw.get("logo_url") or raw.get("image_url") or raw.get("icon_url"))
+        name = decode_field(raw.get("subnet_name") or raw.get("name") or raw.get("subnetName"))
 
         return {
             "ok": True,
             "netuid": netuid,
-            "logo_url": logo_url or None,
-            "name": name or None,
-            "raw_keys": list(raw.keys()) if isinstance(raw, dict) else None,
-            "raw": str(raw)[:300]
+            "logo_url": logo_url,
+            "name": name
         }
 
     except Exception as e:
