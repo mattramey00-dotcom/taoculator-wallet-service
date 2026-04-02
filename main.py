@@ -77,48 +77,38 @@ async def wallet(address: str):
 async def subnet_identity(netuid: int):
     try:
         sub = get_subtensor()
-        debug = {}
+        result = sub.substrate.query(
+            module="SubtensorModule",
+            storage_function="SubnetIdentitiesV3",
+            params=[netuid]
+        )
 
-        for storage_fn in ['SubnetIdentitiesV3', 'SubnetIdentitiesV2', 'SubnetIdentities']:
-            try:
-                result = sub.substrate.query(
-                    module="SubtensorModule",
-                    storage_function=storage_fn,
-                    params=[netuid]
-                )
-                raw = result.value if result else None
-                debug[storage_fn] = str(raw)[:400] if raw is not None else "None"
+        # SubnetIdentitiesV3 returns a dict directly, not a ScaleType with .value
+        raw = None
+        if result is not None:
+            if isinstance(result, dict):
+                raw = result
+            elif hasattr(result, 'value') and result.value is not None:
+                raw = result.value
+            elif hasattr(result, 'serialize'):
+                raw = result.serialize()
 
-                if raw is not None:
-                    logo_url = None
-                    name = None
-                    if isinstance(raw, dict):
-                        # Try all known field name variants
-                        logo_url = (raw.get("logo_url") or raw.get("image_url") or
-                                    raw.get("icon_url") or raw.get("logo") or
-                                    raw.get("logoUrl") or raw.get("image") or "")
-                        name = (raw.get("subnet_name") or raw.get("name") or
-                                raw.get("subnetName") or raw.get("SubnetName") or "")
-                    return {
-                        "ok": True,
-                        "netuid": netuid,
-                        "logo_url": logo_url or None,
-                        "name": name or None,
-                        "storage_fn": storage_fn,
-                        "raw": str(raw)[:400],
-                        "raw_keys": list(raw.keys()) if isinstance(raw, dict) else None
-                    }
-            except Exception as e:
-                debug[storage_fn] = f"ERROR: {str(e)[:100]}"
-                continue
+        if raw is None:
+            return {"ok": True, "netuid": netuid, "logo_url": None, "name": None, "raw": str(result)[:200]}
+
+        logo_url = (raw.get("logo_url") or raw.get("image_url") or
+                    raw.get("icon_url") or raw.get("logo") or
+                    raw.get("logoUrl") or "")
+        name = (raw.get("subnet_name") or raw.get("name") or
+                raw.get("subnetName") or raw.get("SubnetName") or "")
 
         return {
             "ok": True,
             "netuid": netuid,
-            "logo_url": None,
-            "name": None,
-            "raw": None,
-            "debug": debug
+            "logo_url": logo_url or None,
+            "name": name or None,
+            "raw_keys": list(raw.keys()) if isinstance(raw, dict) else None,
+            "raw": str(raw)[:300]
         }
 
     except Exception as e:
