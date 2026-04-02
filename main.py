@@ -39,11 +39,7 @@ async def wallet(address: str):
                 root_stake_tao += alpha_amount
             elif alpha_amount > 0.000001:
                 if netuid not in subnet_map:
-                    subnet_map[netuid] = {
-                        "netuid": netuid,
-                        "name": f"SN{netuid}",
-                        "alphaTotal": 0.0,
-                    }
+                    subnet_map[netuid] = {"netuid": netuid, "name": f"SN{netuid}", "alphaTotal": 0.0}
                 subnet_map[netuid]["alphaTotal"] += alpha_amount
 
         alpha_positions = []
@@ -52,8 +48,8 @@ async def wallet(address: str):
                 "netuid": netuid,
                 "name": s["name"],
                 "alphaAmount": round(s["alphaTotal"], 6),
-                "alphaPriceTao": 0.0,  # enriched client-side via Taostats
-                "taoValue": 0.0,       # enriched client-side via Taostats
+                "alphaPriceTao": 0.0,
+                "taoValue": 0.0,
                 "validators": []
             })
 
@@ -75,3 +71,32 @@ async def wallet(address: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/subnet-identity/{netuid}")
+async def subnet_identity(netuid: int):
+    try:
+        sub = get_subtensor()
+        result = sub.substrate.query(
+            module="SubtensorModule",
+            storage_function="SubnetIdentity",
+            params=[netuid]
+        )
+        if result is None or result.value is None:
+            return {"ok": True, "netuid": netuid, "logo_url": None, "name": None}
+
+        val = result.value
+        # SubnetIdentity returns a struct with name, logo_url, etc.
+        logo_url = None
+        name = None
+        if isinstance(val, dict):
+            logo_url = val.get("logo_url") or val.get("image_url") or val.get("icon_url")
+            name = val.get("subnet_name") or val.get("name")
+        elif hasattr(val, "logo_url"):
+            logo_url = str(val.logo_url) if val.logo_url else None
+            name = str(val.subnet_name) if hasattr(val, "subnet_name") else None
+
+        return {"ok": True, "netuid": netuid, "logo_url": logo_url, "name": name, "raw": str(val)[:200]}
+
+    except Exception as e:
+        return {"ok": True, "netuid": netuid, "logo_url": None, "name": None, "error": str(e)[:100]}
