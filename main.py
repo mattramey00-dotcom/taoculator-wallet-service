@@ -153,25 +153,50 @@ def _normalize_event(block_number, ev):
         # Attributes are returned as a list of {name, value} dicts OR as a list
         # of raw values — handle both shapes defensively across bittensor versions.
         attrs = ev.get("attributes") or ev.get("params") or []
+        # Subtensor StakeAdded/StakeRemoved signature is 5-tuple:
+        #   (coldkey, hotkey, tao_amount_rao, alpha_amount_rao, netuid)
+        # Older variants may be 4-tuple or named-dict; handle defensively.
+        named = {}
         if attrs and isinstance(attrs[0], dict):
-            named = {a.get("name") or a.get("type"): a.get("value") for a in attrs}
+            for a in attrs:
+                named[a.get("name") or a.get("type")] = a.get("value")
         else:
-            # Positional: subtensor StakeAdded = (coldkey, hotkey, amount, netuid)
-            named = {}
-            keys = ["coldkey", "hotkey", "amount", "netuid"]
-            for i, v in enumerate(attrs[:4]):
-                named[keys[i]] = v
+            # Positional mapping based on StakeAdded's 5-arg signature
+            vals = list(attrs)
+            if len(vals) >= 1: named["coldkey"] = vals[0]
+            if len(vals) >= 2: named["hotkey"] = vals[1]
+            if len(vals) >= 3: named["tao_amount"] = vals[2]
+            if len(vals) >= 5:
+                # 5-tuple: [ck, hk, tao, alpha, netuid]
+                named["alpha_amount"] = vals[3]
+                named["netuid"] = vals[4]
+            elif len(vals) == 4:
+                # Older 4-tuple: [ck, hk, tao, netuid]
+                named["netuid"] = vals[3]
         coldkey = named.get("coldkey") or named.get("who")
         hotkey = named.get("hotkey")
         netuid = named.get("netuid")
-        amount_rao = named.get("amount") or named.get("stake") or 0
+        amount_rao = (
+            named.get("tao_amount")
+            or named.get("amount")
+            or named.get("stake")
+            or 0
+        )
+        alpha_rao = named.get("alpha_amount") or 0
         try:
             amount_tao = float(amount_rao) / 1e9
         except Exception:
             amount_tao = 0.0
         try:
+            alpha_amount = float(alpha_rao) / 1e9
+        except Exception:
+            alpha_amount = 0.0
+        try:
             netuid = int(netuid) if netuid is not None else None
         except Exception:
+            netuid = None
+        # Sanity: real subnets are small integers; anything else is a mis-decode
+        if netuid is not None and (netuid < 0 or netuid > 1024):
             netuid = None
         return {
             "block": block_number,
@@ -180,6 +205,7 @@ def _normalize_event(block_number, ev):
             "hotkey": hotkey,
             "netuid": netuid,
             "tao": round(amount_tao, 6),
+            "alpha": round(alpha_amount, 6),
         }
     except Exception:
         return None
