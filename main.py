@@ -124,6 +124,117 @@ async def wallet(address: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Recent on-chain activity (stake/unstake ticker) ─────────────────────
+# Reads the last N blocks of events from subtensor, filters for
+# stake-related extrinsics, returns a normalized ticker feed. Pure chain
+# query — no Taostats, no rate limit.
+
+_STAKE_EVENT_MODULE = "SubtensorModule"
+_STAKE_EVENT_NAMES = {
+    "StakeAdded": "stake",
+    "StakeRemoved": "unstake",
+    # Older subnet-dynamic naming variants
+    "StakeTransferred": "transfer",
+    "AlphaStaked": "stake",
+    "AlphaUnstaked": "unstake",
+}
+
+
+def _normalize_event(block_number, ev):
+    """Turn a substrate event dict into a ticker row, or None if not of interest."""
+    try:
+        ev_module = ev.get("module_id") or ev.get("event_module") or ""
+        ev_name = ev.get("event_id") or ev.get("event_name") or ""
+        if ev_module != _STAKE_EVENT_MODULE:
+            return None
+        kind = _STAKE_EVENT_NAMES.get(ev_name)
+        if kind is None:
+            return None
+        # Attributes are returned as a list of {name, value} dicts OR as a list
+        # of raw values — handle both shapes defensively across bittensor versions.
+        attrs = ev.get("attributes") or ev.get("params") or []
+        if attrs and isinstance(attrs[0], dict):
+            named = {a.get("name") or a.get("type"): a.get("value") for a in attrs}
+        else:
+            # Positional: subtensor StakeAdded = (coldkey, hotkey, amount, netuid)
+            named = {}
+            keys = ["coldkey", "hotkey", "amount", "netuid"]
+            for i, v in enumerate(attrs[:4]):
+                named[keys[i]] = v
+        coldkey = named.get("coldkey") or named.get("who")
+        hotkey = named.get("hotkey")
+        netuid = named.get("netuid")
+        amount_rao = named.get("amount") or named.get("stake") or 0
+        try:
+            amount_tao = float(amount_rao) / 1e9
+        except Exception:
+            amount_tao = 0.0
+        try:
+            netuid = int(netuid) if netuid is not None else None
+        except Exception:
+            netuid = None
+        return {
+            "block": block_number,
+            "kind": kind,
+            "coldkey": coldkey,
+            "hotkey": hotkey,
+            "netuid": netuid,
+            "tao": round(amount_tao, 6),
+        }
+    except Exception:
+        return None
+
+
+@app.get("/recent-events")
+async def recent_events(blocks: int = 20, min_tao: float = 0.0, limit: int = 100):
+    """Return recent stake/unstake activity from the last N blocks.
+
+    Only reads chain — no third-party APIs. N is capped at 50 to bound
+    latency on a free-tier instance (each block = 1 substrate call).
+    """
+    blocks = max(1, min(int(blocks or 20), 50))
+    limit = max(1, min(int(limit or 100), 500))
+    try:
+        sub = get_subtensor()
+        substrate = sub.substrate
+        head_hash = substrate.get_chain_head()
+        head_num = substrate.get_block_number(head_hash)
+        rows = []
+        for offset in range(blocks):
+            bn = head_num - offset
+            if bn < 0:
+                break
+            try:
+                bh = substrate.get_block_hash(bn)
+                events = substrate.get_events(bh)
+            except Exception:
+                continue
+            for ev in (events or []):
+                # substrate-interface returns objects with .value dict or raw dicts
+                payload = ev.value if hasattr(ev, "value") else ev
+                if isinstance(payload, dict) and "event" in payload:
+                    payload = payload["event"]
+                norm = _normalize_event(bn, payload)
+                if norm is None:
+                    continue
+                if min_tao and norm["tao"] < min_tao:
+                    continue
+                rows.append(norm)
+                if len(rows) >= limit:
+                    break
+            if len(rows) >= limit:
+                break
+        return {
+            "ok": True,
+            "head_block": head_num,
+            "blocks_scanned": min(blocks, head_num + 1),
+            "count": len(rows),
+            "events": rows,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def decode_field(val):
     """Convert byte array or string to decoded string."""
     if val is None:
