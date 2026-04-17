@@ -17,6 +17,53 @@ def get_subtensor():
 def health():
     return {"ok": True}
 
+def _balance_to_float(b):
+    """Convert a bittensor Balance / Decimal / number to float TAO."""
+    if b is None:
+        return 0.0
+    if hasattr(b, "tao"):
+        try:
+            return float(b.tao)
+        except Exception:
+            pass
+    try:
+        return float(b)
+    except Exception:
+        return 0.0
+
+
+def _fetch_pool_prices(sub):
+    """Query all subnet pools once and return {netuid: price_in_tao}.
+
+    Price = tao_in_pool / alpha_in_pool for each subnet AMM. This is the
+    same computation Taostats performs server-side; doing it here keeps
+    wallet valuation fully on-chain and drops the frontend's dependency
+    on the /taostats worker for current prices.
+    """
+    prices = {}
+    try:
+        subnets = sub.all_subnets()
+    except Exception:
+        return prices
+    for info in (subnets or []):
+        try:
+            n = int(getattr(info, "netuid", -1))
+            if n <= 0:
+                continue
+            # bittensor 10.x exposes a `price` field on DynamicInfo already.
+            # Fall back to tao_in/alpha_in if it's missing or zero.
+            p = _balance_to_float(getattr(info, "price", None))
+            if p <= 0:
+                tao_in = _balance_to_float(getattr(info, "tao_in", None))
+                alpha_in = _balance_to_float(getattr(info, "alpha_in", None))
+                p = (tao_in / alpha_in) if alpha_in > 0 else 0.0
+            if p > 0:
+                prices[n] = p
+        except Exception:
+            continue
+    return prices
+
+
 @app.get("/wallet")
 async def wallet(address: str):
     if not address or not address.startswith("5") or len(address) < 47:
@@ -24,6 +71,7 @@ async def wallet(address: str):
     try:
         sub = get_subtensor()
         stake_info = sub.get_stake_info_for_coldkey(coldkey_ss58=address)
+        pool_prices = _fetch_pool_prices(sub)
 
         root_stake_tao = 0.0
         subnet_map = {}
@@ -44,12 +92,14 @@ async def wallet(address: str):
 
         alpha_positions = []
         for netuid, s in subnet_map.items():
+            amt = round(s["alphaTotal"], 6)
+            price = float(pool_prices.get(netuid, 0.0) or 0.0)
             alpha_positions.append({
                 "netuid": netuid,
                 "name": s["name"],
-                "alphaAmount": round(s["alphaTotal"], 6),
-                "alphaPriceTao": 0.0,
-                "taoValue": 0.0,
+                "alphaAmount": amt,
+                "alphaPriceTao": price,
+                "taoValue": round(amt * price, 6),
                 "validators": []
             })
 
@@ -65,7 +115,8 @@ async def wallet(address: str):
             "_debug": {
                 "source": "subtensor-onchain",
                 "stakeRecords": len(stake_info),
-                "alphaSubnets": len(alpha_positions)
+                "alphaSubnets": len(alpha_positions),
+                "pricedSubnets": sum(1 for p in alpha_positions if p["alphaPriceTao"] > 0)
             }
         }
 
