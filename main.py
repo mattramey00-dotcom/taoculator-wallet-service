@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import bittensor as bt
@@ -8,9 +10,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], a
 subtensor = None
 
 def get_subtensor():
+    """Return a cached bt.Subtensor client.
+
+    Defaults to the public finney entrypoint. If SUBTENSOR_URL is set in the
+    environment, use that instead — this lets us swap to a more reliable
+    provider (e.g. OnFinality's authenticated WSS endpoint with its 400k/day
+    free-tier quota) without code changes. Format expected:
+        wss://apikey-<KEY>@bittensor-finney.api.onfinality.io/public-ws
+    or any other fully-qualified WSS/HTTPS substrate endpoint.
+    """
     global subtensor
     if subtensor is None:
-        subtensor = bt.Subtensor(network="finney")
+        network = os.environ.get("SUBTENSOR_URL", "").strip() or "finney"
+        subtensor = bt.Subtensor(network=network)
     return subtensor
 
 @app.get("/health")
