@@ -17,6 +17,47 @@ def get_subtensor():
 def health():
     return {"ok": True}
 
+
+@app.get("/all-subnets")
+async def all_subnets_endpoint():
+    """Pool reserves + price for every active subnet, straight from chain.
+
+    Used by taoculator-snapshots' hourly cron as a Taostats-free source for
+    the subnet_snapshots table (tao_in_pool, alpha_in_pool, price per netuid).
+    Response shape matches what the cron needs one-for-one so the worker can
+    swap sources with a minimal code change.
+    """
+    try:
+        sub = get_subtensor()
+        subnets = sub.all_subnets()
+        out = []
+        for info in (subnets or []):
+            try:
+                n = int(getattr(info, "netuid", -1))
+                if n < 0:
+                    continue
+                tao_in = _balance_to_float(getattr(info, "tao_in", None))
+                alpha_in = _balance_to_float(getattr(info, "alpha_in", None))
+                price = _balance_to_float(getattr(info, "price", None))
+                if price <= 0 and alpha_in > 0:
+                    price = tao_in / alpha_in
+                out.append({
+                    "netuid": n,
+                    "tao_in_pool": round(tao_in, 6),
+                    "alpha_in_pool": round(alpha_in, 6),
+                    "price": round(price, 9),
+                })
+            except Exception:
+                continue
+        return {
+            "ok": True,
+            "count": len(out),
+            "subnets": out,
+            "_debug": {"source": "subtensor-onchain"},
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 def _balance_to_float(b):
     """Convert a bittensor Balance / Decimal / number to float TAO."""
     if b is None:
