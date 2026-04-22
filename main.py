@@ -369,58 +369,26 @@ async def subnet_identity(netuid: int):
 _VALIDATOR_CACHE = {"coldkeys": None, "ts": 0, "subnets_scanned": 0, "partial": False}
 
 
-def _do_validator_walk(max_seconds: int):
-    """Synchronous metagraph walk. Called from a thread so the event loop
-    stays free to serve /wallet and /health requests concurrently."""
-    import time as _time
-
-    sub = get_subtensor()
-    subnets = sub.all_subnets() or []
-    start = _time.time()
-    deadline = start + max_seconds
-    unique = set()
-    scanned = 0
-    partial = False
-    for info in subnets:
-        if _time.time() > deadline:
-            partial = True
-            break
-        try:
-            n = int(getattr(info, "netuid", -1))
-            if n < 0:
-                continue
-            mg = sub.get_metagraph_info(n)
-            cks = getattr(mg, "coldkeys", None) or []
-            for ck in cks:
-                if not ck:
-                    continue
-                s = str(ck).strip().lower()
-                if s:
-                    unique.add(s)
-            scanned += 1
-        except Exception:
-            continue
-    return {
-        "coldkeys": sorted(unique),
-        "subnets_scanned": scanned,
-        "partial": partial,
-        "duration_seconds": round(_time.time() - start, 1),
-    }
-
-
 @app.get("/validator-coldkeys")
 async def validator_coldkeys(refresh: int = 0, max_seconds: int = 75):
     """Return the authoritative set of validator/miner coldkeys from chain.
 
-    The walk is sync (bittensor SDK) and takes ~60-90s. We offload it to a
-    worker thread via asyncio.to_thread so the single-worker uvicorn on
-    Render keeps serving /wallet and /health on the event loop in parallel.
-    Without this, every refresh makes the wallet service appear down to all
-    other callers for the duration of the walk.
+    Walks every subnet's metagraph and collects the unique `coldkeys` list
+    (these are the ss58 addresses that own registered hotkeys — i.e. people
+    running validators or miners, not pure investors).
 
-    Cached on the service instance. Pass refresh=1 to force a rebuild.
+    Used by the taoculator-signals worker to separate validator self-stake
+    from real investor conviction when computing the smart-money cohort.
+
+    Response:
+        { ok, coldkeys: [...], count, subnets_scanned, partial, cached_at }
+
+    The walk takes ~60-90s on Finney because each get_metagraph_info is an
+    RPC round-trip. We cache the result on the service instance and refresh
+    only when `refresh=1` is passed. `max_seconds` bounds the walk so we
+    don't exceed Render's request timeout — if we hit the budget we return
+    partial=True and the caller decides whether to retry.
     """
-    import asyncio
     import time as _time
 
     now = _time.time()
@@ -437,18 +405,48 @@ async def validator_coldkeys(refresh: int = 0, max_seconds: int = 75):
         }
 
     try:
-        result = await asyncio.to_thread(_do_validator_walk, max_seconds)
-        _VALIDATOR_CACHE["coldkeys"] = result["coldkeys"]
-        _VALIDATOR_CACHE["subnets_scanned"] = result["subnets_scanned"]
-        _VALIDATOR_CACHE["partial"] = result["partial"]
+        sub = get_subtensor()
+        subnets = sub.all_subnets() or []
+        # Deadline-aware walk: stop pulling new metagraphs once we've spent
+        # max_seconds. We always finish whatever subnet we started.
+        start = _time.time()
+        deadline = start + max_seconds
+        unique = set()
+        scanned = 0
+        partial = False
+        for info in subnets:
+            if _time.time() > deadline:
+                partial = True
+                break
+            try:
+                n = int(getattr(info, "netuid", -1))
+                if n < 0:
+                    continue
+                mg = sub.get_metagraph_info(n)
+                cks = getattr(mg, "coldkeys", None) or []
+                for ck in cks:
+                    if not ck:
+                        continue
+                    s = str(ck).strip().lower()
+                    if s:
+                        unique.add(s)
+                scanned += 1
+            except Exception:
+                # Skip bad subnets; don't let one bad RPC sink the whole walk
+                continue
+
+        coldkey_list = sorted(unique)
+        _VALIDATOR_CACHE["coldkeys"] = coldkey_list
+        _VALIDATOR_CACHE["subnets_scanned"] = scanned
+        _VALIDATOR_CACHE["partial"] = partial
         _VALIDATOR_CACHE["ts"] = now
         return {
             "ok": True,
-            "coldkeys": result["coldkeys"],
-            "count": len(result["coldkeys"]),
-            "subnets_scanned": result["subnets_scanned"],
-            "partial": result["partial"],
-            "duration_seconds": result["duration_seconds"],
+            "coldkeys": coldkey_list,
+            "count": len(coldkey_list),
+            "subnets_scanned": scanned,
+            "partial": partial,
+            "duration_seconds": round(_time.time() - start, 1),
             "source": "fresh",
         }
     except Exception as e:
