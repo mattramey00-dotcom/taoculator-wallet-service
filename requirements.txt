@@ -1,3 +1,9 @@
 fastapi==0.111.0
 uvicorn==0.29.0
 bittensor==10.1.0
+# Pin the transitive dep: async-substrate-interface released 2.0.0 on
+# 2026-04-19 which replaces scalecodec with cyscale. bittensor 10.1.0
+# still requires scalecodec==1.2.12, so having both installed raises
+# "Conflict detected: 'scalecodec' ... conflicts with 'cyscale'" at
+# import time. Pin <2.0 until bittensor catches up.
+async-substrate-interface<2.0.0

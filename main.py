@@ -361,4 +361,3 @@ async def subnet_identity(netuid: int):
 
     except Exception as e:
         return {"ok": True, "netuid": netuid, "logo_url": None, "name": None, "error": str(e)[:200]}
-# touch 2026-04-22T02:21:25Z to force re-deploy
