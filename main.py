@@ -363,6 +363,183 @@ async def subnet_identity(netuid: int):
         return {"ok": True, "netuid": netuid, "logo_url": None, "name": None, "error": str(e)[:200]}
 
 
+# ── Conviction protocol (BIT-0011, subtensor PR #2599, May 2026) ────────
+# Subnet owners auto-lock 100% of their 18% emission share to their own
+# hotkey; anyone else can voluntarily lock alpha to the owner's hotkey or
+# to a challenger. The chain exposes a `subnet_king` concept = whichever
+# hotkey has the most locked alpha on that subnet. When king != owner, a
+# community member or rival has overtaken the owner — the actionable
+# signal we want to surface.
+#
+# IMPORTANT: this is NOT the same as the client-side "Tenure" feature in
+# index.html. Tenure = how long a coldkey has held a position (behavioural,
+# derived from StakeEvent timestamps). Conviction = explicit on-chain lock
+# via lock_stake extrinsic. Different data path, different meaning.
+#
+# Storage shape (from subtensor lib.rs at b05822e3):
+#   HotkeyLock: StorageDoubleMap<(netuid, hotkey), LockState>
+#     LockState { locked_mass, unlocked_mass, conviction, last_update }
+#   SubnetOwnerHotkey: StorageMap<netuid, hotkey>
+#   SubnetOwner: StorageMap<netuid, coldkey>
+
+
+def _decode_lock_state(raw):
+    """Pull a LockState dict from a HotkeyLock storage value. Defensive
+    across substrate-interface return shapes."""
+    if raw is None:
+        return None
+    if hasattr(raw, "value") and raw.value is not None:
+        raw = raw.value
+    if hasattr(raw, "serialize"):
+        try:
+            raw = raw.serialize()
+        except Exception:
+            pass
+    if not isinstance(raw, dict):
+        return None
+    return {
+        "locked_mass": raw.get("locked_mass") or raw.get("lockedMass") or 0,
+        "unlocked_mass": raw.get("unlocked_mass") or raw.get("unlockedMass") or 0,
+        "conviction": raw.get("conviction") or 0,
+        "last_update": raw.get("last_update") or raw.get("lastUpdate") or 0,
+    }
+
+
+def _alpha_to_float(v):
+    """LockState's locked_mass/unlocked_mass are AlphaBalance (u64 in RAO).
+    Divide by 1e9. Guard against already-decoded floats."""
+    try:
+        n = float(v)
+    except Exception:
+        return 0.0
+    return n / 1e9 if n > 1e6 else n
+
+
+def _u64f64_to_float(v):
+    """Conviction is U64F64 — raw integer / 2^64."""
+    try:
+        n = float(v)
+    except Exception:
+        return 0.0
+    return n / (2 ** 64) if n > 1e12 else n
+
+
+@app.get("/conviction/{netuid}")
+async def conviction(netuid: int):
+    """Return the conviction king + owner for a subnet.
+
+    King = hotkey with the most alpha locked toward it (HotkeyLock entry
+    with the largest locked_mass on this netuid). Sorted by locked_mass
+    rather than the U64F64 conviction score because locked_mass is the
+    leading indicator — conviction matures off it on a 62-day half-life,
+    so a fresh huge lock is a signal even before conviction has caught up.
+    Both values are returned so the caller can choose.
+
+    Owner = SubnetOwnerHotkey(netuid). Auto-locked emissions accumulate
+    here every block, so for most subnets the owner will also be the king.
+    The actionable case is king != owner.
+    """
+    if netuid < 0 or netuid > 1024:
+        raise HTTPException(status_code=400, detail="Invalid netuid")
+    try:
+        sub = get_subtensor()
+        substrate = sub.substrate
+
+        owner_hotkey = None
+        owner_coldkey = None
+        try:
+            r = substrate.query("SubtensorModule", "SubnetOwnerHotkey", [netuid])
+            if r is not None:
+                v = r.value if hasattr(r, "value") else r
+                if v:
+                    owner_hotkey = str(v)
+        except Exception:
+            pass
+        try:
+            r = substrate.query("SubtensorModule", "SubnetOwner", [netuid])
+            if r is not None:
+                v = r.value if hasattr(r, "value") else r
+                if v:
+                    owner_coldkey = str(v)
+        except Exception:
+            pass
+
+        # Iterate HotkeyLock(netuid, *) — every hotkey with locked alpha
+        # on this subnet. query_map with a partial key walks the second
+        # dimension of the DoubleMap.
+        king_hotkey = None
+        king_locked = 0.0
+        king_conviction = 0.0
+        total_locked = 0.0
+        total_conviction = 0.0
+        hotkey_count = 0
+        rows = []
+
+        try:
+            iterator = substrate.query_map(
+                module="SubtensorModule",
+                storage_function="HotkeyLock",
+                params=[netuid],
+            )
+            for hotkey_key, lock_state in iterator:
+                ls = _decode_lock_state(lock_state)
+                if ls is None:
+                    continue
+                hotkey_count += 1
+                locked = _alpha_to_float(ls["locked_mass"])
+                conv = _u64f64_to_float(ls["conviction"])
+                if locked <= 0:
+                    continue
+                hk = str(hotkey_key.value if hasattr(hotkey_key, "value") else hotkey_key)
+                total_locked += locked
+                total_conviction += conv
+                rows.append({"hotkey": hk, "lockedAlpha": locked, "conviction": conv})
+                if locked > king_locked:
+                    king_hotkey = hk
+                    king_locked = locked
+                    king_conviction = conv
+        except Exception as e:
+            return {
+                "ok": False,
+                "netuid": netuid,
+                "error": f"HotkeyLock query failed: {str(e)[:200]}",
+                "_debug": {"source": "subtensor-onchain", "convictionEndpoint": True},
+            }
+
+        rows.sort(key=lambda r: r["lockedAlpha"], reverse=True)
+        top = [
+            {
+                "hotkey": r["hotkey"],
+                "lockedAlpha": round(r["lockedAlpha"], 6),
+                "conviction": round(r["conviction"], 6),
+            }
+            for r in rows[:5]
+        ]
+
+        return {
+            "ok": True,
+            "netuid": netuid,
+            "kingHotkey": king_hotkey,
+            "kingLockedAlpha": round(king_locked, 6),
+            "kingConviction": round(king_conviction, 6),
+            "ownerHotkey": owner_hotkey,
+            "ownerColdkey": owner_coldkey,
+            "kingIsOwner": (king_hotkey is not None and owner_hotkey is not None and king_hotkey == owner_hotkey),
+            "totalLockedAlpha": round(total_locked, 6),
+            "totalConviction": round(total_conviction, 6),
+            "hotkeyCount": hotkey_count,
+            "top": top,
+            "_debug": {
+                "source": "subtensor-onchain",
+                "storageMap": "SubtensorModule.HotkeyLock",
+                "convictionEndpoint": True,
+            },
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # In-memory cache of the validator coldkey set. Populated by /validator-coldkeys
 # (the metagraph walk is expensive, ~60-90s for a full sweep, so we cache it on
 # the service instance and refresh on demand via ?refresh=1).
