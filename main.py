@@ -424,6 +424,119 @@ def _u64f64_to_float(v):
     return n / (2 ** 64) if n > 1e12 else n
 
 
+@app.get("/conviction/metadata")
+async def conviction_metadata():
+    """Diagnostic — what conviction/lock storage actually exists on chain?
+
+    The pallet PR #2599 was merged to subtensor `main` 2026-05-01 but a
+    follow-up PR #2656 ("Temporarily disable stake locking to allow
+    conviction redesign") and PR #2658 ("Conviction v2") are open. So
+    mainnet finney may be running an older runtime without HotkeyLock,
+    OR may eventually expose conviction under a different storage name.
+
+    This endpoint probes (a) candidate storage paths by attempting a
+    one-shot query and (b) walks the chain metadata for any storage
+    entries matching "lock" or "conviction". When v2 ships we'll see the
+    actual name here and can fix /conviction/{netuid} without guessing.
+    """
+    try:
+        sub = get_subtensor()
+        substrate = sub.substrate
+
+        # Runtime version — bumps every chain upgrade.
+        runtime_version = None
+        runtime_name = None
+        try:
+            rv = substrate.get_runtime_version()
+            if isinstance(rv, dict):
+                runtime_version = rv.get("specVersion") or rv.get("spec_version")
+                runtime_name = rv.get("specName") or rv.get("spec_name")
+        except Exception:
+            pass
+
+        # Candidate probe — try a single-key query against each. ValueQuery
+        # storage returns a default (not an error) if the storage exists but
+        # the key is unknown, so the absence of an exception is "exists".
+        probes = [
+            ("SubtensorModule", "HotkeyLock"),
+            ("SubtensorModule", "Lock"),
+            ("SubtensorModule", "Locks"),
+            ("SubtensorModule", "Conviction"),
+            ("SubtensorModule", "ConvictionLock"),
+            ("SubtensorModule", "LockedAlpha"),
+            ("SubtensorModule", "MaturityRate"),
+            ("SubtensorModule", "UnlockRate"),
+            ("Conviction", "HotkeyLock"),
+            ("Conviction", "Lock"),
+            ("Lock", "HotkeyLock"),
+        ]
+        probe_results = []
+        for module_name, storage_name in probes:
+            try:
+                substrate.query(module=module_name, storage_function=storage_name, params=[0])
+                probe_results.append({"module": module_name, "storage": storage_name, "exists": True})
+            except Exception as e:
+                msg = str(e)[:120]
+                probe_results.append({
+                    "module": module_name,
+                    "storage": storage_name,
+                    "exists": False,
+                    "error": msg,
+                })
+
+        # Metadata walk — find every storage function whose name contains
+        # "lock" or "conviction". Substrate-interface 1.x exposes metadata
+        # in a few different shapes depending on version; try several.
+        matches = []
+        try:
+            md = substrate.get_metadata()
+            value = getattr(md, "value", None) or md
+            # V14: value = {"magicNumber": ..., "metadata": {"V14": {"pallets": [...]}}}
+            pallets = None
+            if isinstance(value, dict):
+                inner = value.get("metadata") or value
+                if isinstance(inner, dict):
+                    for v in ("V14", "V13", "V12"):
+                        if v in inner:
+                            pallets = inner[v].get("pallets")
+                            break
+            if pallets is None:
+                pallets = getattr(md, "pallets", None) or []
+
+            for p in pallets:
+                pname = p.get("name") if isinstance(p, dict) else getattr(p, "name", None)
+                storage = p.get("storage") if isinstance(p, dict) else getattr(p, "storage", None)
+                if not storage:
+                    continue
+                entries = (
+                    storage.get("entries") if isinstance(storage, dict)
+                    else getattr(storage, "entries", None) or []
+                )
+                for e in entries:
+                    ename = e.get("name") if isinstance(e, dict) else getattr(e, "name", None)
+                    if not ename:
+                        continue
+                    lo = ename.lower()
+                    if "lock" in lo or "conviction" in lo:
+                        matches.append({"pallet": pname, "storage": ename})
+        except Exception as e:
+            matches = [{"error": f"metadata walk failed: {str(e)[:200]}"}]
+
+        return {
+            "ok": True,
+            "runtime_version": runtime_version,
+            "runtime_name": runtime_name,
+            "probes": probe_results,
+            "matches": matches,
+            "_debug": {
+                "source": "subtensor-onchain",
+                "convictionMetadataEndpoint": True,
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/conviction/{netuid}")
 async def conviction(netuid: int):
     """Return the conviction king + owner for a subnet.
