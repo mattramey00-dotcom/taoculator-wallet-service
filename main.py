@@ -424,6 +424,35 @@ def _u64f64_to_float(v):
     return n / (2 ** 64) if n > 1e12 else n
 
 
+def _ss58_from_key(k):
+    """Decode a query_map AccountId32 key into an SS58 string.
+
+    substrate-interface returns the second-dimension key of a DoubleMap
+    iteration as a 1-tuple of a 32-tuple of u8 (e.g. `((90, 50, 232, ...),)`).
+    A plain `str()` of that is unusable as a hotkey — callers need the SS58.
+    Bittensor's mainnet uses the generic Substrate prefix (42).
+    """
+    v = k.value if hasattr(k, "value") else k
+    if isinstance(v, tuple) and len(v) == 1:
+        v = v[0]
+    if isinstance(v, (tuple, list)):
+        try:
+            v = bytes(v)
+        except Exception:
+            return str(v)
+    if isinstance(v, (bytes, bytearray)) and len(v) == 32:
+        try:
+            from substrateinterface.utils.ss58 import ss58_encode
+            return ss58_encode(bytes(v), ss58_format=42)
+        except Exception:
+            try:
+                from scalecodec.utils.ss58 import ss58_encode
+                return ss58_encode(bytes(v), ss58_format=42)
+            except Exception:
+                return str(v)
+    return str(v)
+
+
 @app.get("/conviction/metadata")
 async def conviction_metadata():
     """Diagnostic — what conviction/lock storage actually exists on chain?
@@ -603,7 +632,7 @@ async def conviction(netuid: int):
                 conv = _u64f64_to_float(ls["conviction"])
                 if locked <= 0:
                     continue
-                hk = str(hotkey_key.value if hasattr(hotkey_key, "value") else hotkey_key)
+                hk = _ss58_from_key(hotkey_key)
                 total_locked += locked
                 total_conviction += conv
                 rows.append({"hotkey": hk, "lockedAlpha": locked, "conviction": conv})
@@ -646,6 +675,7 @@ async def conviction(netuid: int):
                 "source": "subtensor-onchain",
                 "storageMap": "SubtensorModule.HotkeyLock",
                 "convictionEndpoint": True,
+                "ss58Decoded": True,
             },
         }
 
