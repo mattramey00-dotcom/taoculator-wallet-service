@@ -691,8 +691,18 @@ _VALIDATOR_CACHE = {"coldkeys": None, "ts": 0, "subnets_scanned": 0, "partial": 
 
 def _do_validator_walk(max_seconds: int):
     """Synchronous metagraph walk. Called from a thread so the event loop
-    stays free to serve /wallet and /health requests concurrently."""
+    stays free to serve /wallet and /health requests concurrently.
+
+    Memory-conscious: this runs on a 512 MB Render instance and each
+    per-subnet metagraph can be large (thousands of neurons on the bigger
+    subnets). We extract just the coldkeys, then explicitly drop the
+    metagraph reference and collect garbage so peak RSS stays ~one
+    metagraph rather than letting freed-but-not-yet-collected objects pile
+    up across the ~130-subnet walk and trip the OOM killer (which forces
+    the Render auto-restart we're trying to avoid).
+    """
     import time as _time
+    import gc
 
     sub = get_subtensor()
     subnets = sub.all_subnets() or []
@@ -718,8 +728,21 @@ def _do_validator_walk(max_seconds: int):
                 if s:
                     unique.add(s)
             scanned += 1
+            # Free the metagraph (and its coldkey list) immediately so the
+            # next subnet's load doesn't stack on top of this one. del drops
+            # the refcount to 0 for the non-cyclic bulk; the periodic
+            # gc.collect() reclaims any reference cycles substrate-interface
+            # leaves behind. Collecting every few subnets bounds peak memory
+            # without paying gc latency on every single iteration.
+            del mg, cks
+            if scanned % 8 == 0:
+                gc.collect()
         except Exception:
             continue
+    # Release the all_subnets snapshot and do a final sweep before we hand
+    # back the (comparatively tiny) coldkey set.
+    del subnets
+    gc.collect()
     return {
         "coldkeys": sorted(unique),
         "subnets_scanned": scanned,
