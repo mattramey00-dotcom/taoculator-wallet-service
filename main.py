@@ -480,7 +480,11 @@ def _load_all_locks(substrate):
     now = _time.time()
     if _LOCK_CACHE["by_netuid"] is not None and (now - _LOCK_CACHE["ts"]) < 120:
         return _LOCK_CACHE["by_netuid"]
-    by_netuid = {}
+    # netuid -> hotkey -> aggregated lock. Key order is (coldkey, netuid, hotkey);
+    # the non-int components are [coldkey, hotkey]. Conviction locks alpha toward
+    # a HOTKEY (multiple coldkeys can lock to the same hotkey), so aggregate by the
+    # LAST account (hotkey) — the owner's hotkey is then the "king".
+    agg = {}
     it = substrate.query_map(module="SubtensorModule", storage_function="Lock")
     for key_obj, lock_val in it:
         key = key_obj.value if hasattr(key_obj, "value") else key_obj
@@ -495,11 +499,15 @@ def _load_all_locks(substrate):
         if locked <= 0:
             continue
         accts = [c for c in comps if not isinstance(c, int)]
-        hk = _ss58_from_key(accts[0]) if accts else None
+        if not accts:
+            continue
+        hotkey = _ss58_from_key(accts[-1])
         conv = _conviction_bits_to_float(val.get("conviction"))
-        by_netuid.setdefault(nid, []).append(
-            {"hotkey": hk, "lockedAlpha": locked, "conviction": conv}
-        )
+        hk_map = agg.setdefault(nid, {})
+        e = hk_map.setdefault(hotkey, {"hotkey": hotkey, "lockedAlpha": 0.0, "conviction": 0.0})
+        e["lockedAlpha"] += locked
+        e["conviction"] += conv
+    by_netuid = {nid: list(hkmap.values()) for nid, hkmap in agg.items()}
     _LOCK_CACHE["by_netuid"] = by_netuid
     _LOCK_CACHE["ts"] = now
     return by_netuid
