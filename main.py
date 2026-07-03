@@ -683,6 +683,46 @@ async def conviction(netuid: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/conviction/probe/{netuid}")
+async def conviction_probe(netuid: int):
+    """Diagnostic: Conviction v2 moved locks off the 2-param HotkeyLock into a
+    3-param SubtensorModule.Lock. Dump raw entries for both so we can see the
+    key order + value shape before wiring /conviction to read Lock. Remove once
+    /conviction is fixed."""
+    sub = get_subtensor()
+    substrate = sub.substrate
+    out = {"netuid": netuid, "hotkeyLock": {}, "lock": {}}
+    try:
+        cnt = 0
+        samples = []
+        it = substrate.query_map(module="SubtensorModule", storage_function="HotkeyLock", params=[netuid])
+        for k, v in it:
+            cnt += 1
+            if len(samples) < 3:
+                val = v.value if hasattr(v, "value") else v
+                samples.append({"key": str(k.value if hasattr(k, "value") else k)[:70], "val": str(val)[:220]})
+        out["hotkeyLock"] = {"count": cnt, "samples": samples}
+    except Exception as e:
+        out["hotkeyLock"] = {"error": str(e)[:220]}
+    try:
+        cnt = 0
+        samples = []
+        it = substrate.query_map(module="SubtensorModule", storage_function="Lock", params=[netuid])
+        for k, v in it:
+            cnt += 1
+            if len(samples) < 6:
+                val = v.value if hasattr(v, "value") else v
+                samples.append({
+                    "key": str(k.value if hasattr(k, "value") else k)[:110],
+                    "val": str(val)[:220],
+                    "valType": type(val).__name__,
+                })
+        out["lock"] = {"count": cnt, "samples": samples}
+    except Exception as e:
+        out["lock"] = {"error": str(e)[:220]}
+    return out
+
+
 # In-memory cache of the validator coldkey set. Populated by /validator-coldkeys
 # (the metagraph walk is expensive, ~60-90s for a full sweep, so we cache it on
 # the service instance and refresh on demand via ?refresh=1).
