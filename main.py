@@ -743,6 +743,43 @@ async def conviction_probe(netuid: int):
         lock_out["byNetuid"] = {"count": cnt, "samples": samples}
     except Exception as e:
         lock_out["byNetuid_error"] = str(e)[:220]
+    # (d) compute this netuid's total by full-map iteration, filtering on the
+    # middle (Identity-hashed u16) netuid key.
+    try:
+        scanned = 0
+        matched = 0
+        total_locked_rao = 0
+        king_locked = 0
+        posns = {}
+        it = substrate.query_map(module="SubtensorModule", storage_function="Lock")
+        for k, v in it:
+            scanned += 1
+            key = k.value if hasattr(k, "value") else k
+            comps = list(key) if isinstance(key, (tuple, list)) else [key]
+            nid = None
+            for idx, c in enumerate(comps):
+                if isinstance(c, int):
+                    nid = c
+                    posns[idx] = posns.get(idx, 0) + 1
+                    break
+            if nid == netuid:
+                val = v.value if hasattr(v, "value") else v
+                lm = val.get("locked_mass", 0) if isinstance(val, dict) else 0
+                matched += 1
+                total_locked_rao += lm
+                if lm > king_locked:
+                    king_locked = lm
+            if scanned >= 60000:
+                break
+        lock_out["computed"] = {
+            "scanned": scanned,
+            "matched": matched,
+            "totalLockedAlpha": round(total_locked_rao / 1e9, 4),
+            "kingLockedAlpha": round(king_locked / 1e9, 4),
+            "netuidKeyPositions": posns,
+        }
+    except Exception as e:
+        lock_out["computed_error"] = str(e)[:220]
     out["lock"] = lock_out
     return out
 
