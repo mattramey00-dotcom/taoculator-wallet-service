@@ -453,6 +453,58 @@ def _ss58_from_key(k):
     return str(v)
 
 
+def _conviction_bits_to_float(c):
+    """Conviction v2 stores conviction as U64F64 wrapped as {'bits': u128}.
+    bits / 2^64 yields the value in RAO (it matures toward locked_mass); divide
+    by 1e9 to return alpha, matching lockedAlpha's scale."""
+    if isinstance(c, dict):
+        c = c.get("bits", 0)
+    try:
+        n = float(c)
+    except Exception:
+        return 0.0
+    return (n / (2 ** 64)) / 1e9
+
+
+# Conviction v2 (mainnet ~2026-07) moved locks off the 2-param HotkeyLock into a
+# 3-key NMap SubtensorModule.Lock keyed (hotkey, netuid, coldkey) — the netuid is
+# the middle, Identity-hashed key, so it can't be used as a query_map prefix. The
+# whole map is small (a few hundred entries network-wide), so scan it once, group
+# by netuid, and cache for 120s. Value shape:
+#   {locked_mass: u64 RAO, conviction: {bits: u128}, last_update: block}
+_LOCK_CACHE = {"by_netuid": None, "ts": 0}
+
+
+def _load_all_locks(substrate):
+    import time as _time
+    now = _time.time()
+    if _LOCK_CACHE["by_netuid"] is not None and (now - _LOCK_CACHE["ts"]) < 120:
+        return _LOCK_CACHE["by_netuid"]
+    by_netuid = {}
+    it = substrate.query_map(module="SubtensorModule", storage_function="Lock")
+    for key_obj, lock_val in it:
+        key = key_obj.value if hasattr(key_obj, "value") else key_obj
+        comps = list(key) if isinstance(key, (tuple, list)) else [key]
+        nid = next((c for c in comps if isinstance(c, int)), None)
+        if nid is None:
+            continue
+        val = lock_val.value if hasattr(lock_val, "value") else lock_val
+        if not isinstance(val, dict):
+            continue
+        locked = _alpha_to_float(val.get("locked_mass", 0))
+        if locked <= 0:
+            continue
+        accts = [c for c in comps if not isinstance(c, int)]
+        hk = _ss58_from_key(accts[0]) if accts else None
+        conv = _conviction_bits_to_float(val.get("conviction"))
+        by_netuid.setdefault(nid, []).append(
+            {"hotkey": hk, "lockedAlpha": locked, "conviction": conv}
+        )
+    _LOCK_CACHE["by_netuid"] = by_netuid
+    _LOCK_CACHE["ts"] = now
+    return by_netuid
+
+
 @app.get("/conviction/metadata")
 async def conviction_metadata():
     """Diagnostic — what conviction/lock storage actually exists on chain?
@@ -606,9 +658,9 @@ async def conviction(netuid: int):
         except Exception:
             pass
 
-        # Iterate HotkeyLock(netuid, *) — every hotkey with locked alpha
-        # on this subnet. query_map with a partial key walks the second
-        # dimension of the DoubleMap.
+        # Conviction locks now live in SubtensorModule.Lock (see _load_all_locks).
+        # The old 2-param HotkeyLock is legacy/empty for subnets that locked under
+        # Conviction v2 (e.g. Lium/SN51 had 0 there but ~387k α here).
         king_hotkey = None
         king_locked = 0.0
         king_conviction = 0.0
@@ -616,35 +668,21 @@ async def conviction(netuid: int):
         total_conviction = 0.0
         hotkey_count = 0
         rows = []
-
         try:
-            iterator = substrate.query_map(
-                module="SubtensorModule",
-                storage_function="HotkeyLock",
-                params=[netuid],
-            )
-            for hotkey_key, lock_state in iterator:
-                ls = _decode_lock_state(lock_state)
-                if ls is None:
-                    continue
+            rows = list(_load_all_locks(substrate).get(netuid, []))
+            for r in rows:
                 hotkey_count += 1
-                locked = _alpha_to_float(ls["locked_mass"])
-                conv = _u64f64_to_float(ls["conviction"])
-                if locked <= 0:
-                    continue
-                hk = _ss58_from_key(hotkey_key)
-                total_locked += locked
-                total_conviction += conv
-                rows.append({"hotkey": hk, "lockedAlpha": locked, "conviction": conv})
-                if locked > king_locked:
-                    king_hotkey = hk
-                    king_locked = locked
-                    king_conviction = conv
+                total_locked += r["lockedAlpha"]
+                total_conviction += r["conviction"]
+                if r["lockedAlpha"] > king_locked:
+                    king_hotkey = r["hotkey"]
+                    king_locked = r["lockedAlpha"]
+                    king_conviction = r["conviction"]
         except Exception as e:
             return {
                 "ok": False,
                 "netuid": netuid,
-                "error": f"HotkeyLock query failed: {str(e)[:200]}",
+                "error": f"Lock query failed: {str(e)[:200]}",
                 "_debug": {"source": "subtensor-onchain", "convictionEndpoint": True},
             }
 
@@ -673,7 +711,7 @@ async def conviction(netuid: int):
             "top": top,
             "_debug": {
                 "source": "subtensor-onchain",
-                "storageMap": "SubtensorModule.HotkeyLock",
+                "storageMap": "SubtensorModule.Lock",
                 "convictionEndpoint": True,
                 "ss58Decoded": True,
             },
