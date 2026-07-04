@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "conv-coldkey-v3"}
+    return {"ok": True, "build": "clean-v4"}
 
 
 @app.get("/all-subnets")
@@ -733,112 +733,6 @@ async def conviction(netuid: int):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/conviction/probe/{netuid}")
-async def conviction_probe(netuid: int):
-    """Diagnostic: Conviction v2 moved locks off the 2-param HotkeyLock into a
-    3-param SubtensorModule.Lock. Dump raw entries for both so we can see the
-    key order + value shape before wiring /conviction to read Lock. Remove once
-    /conviction is fixed."""
-    sub = get_subtensor()
-    substrate = sub.substrate
-    out = {"netuid": netuid, "hotkeyLock": {}, "lock": {}}
-    try:
-        cnt = 0
-        samples = []
-        it = substrate.query_map(module="SubtensorModule", storage_function="HotkeyLock", params=[netuid])
-        for k, v in it:
-            cnt += 1
-            if len(samples) < 3:
-                val = v.value if hasattr(v, "value") else v
-                samples.append({"key": str(k.value if hasattr(k, "value") else k)[:70], "val": str(val)[:220]})
-        out["hotkeyLock"] = {"count": cnt, "samples": samples}
-    except Exception as e:
-        out["hotkeyLock"] = {"error": str(e)[:220]}
-    lock_out = {}
-    # (a) metadata key structure for Lock
-    try:
-        pallet = substrate.metadata.get_metadata_pallet("SubtensorModule")
-        for s in (getattr(pallet, "storage", None) or []):
-            nm = s.value.get("name") if hasattr(s, "value") else getattr(s, "name", None)
-            if nm == "Lock":
-                lock_out["meta"] = str(s.value.get("type"))[:600]
-                break
-    except Exception as e:
-        lock_out["meta_error"] = str(e)[:220]
-    # (b) full-map sample (no params) — reveals the key order/shape
-    try:
-        cnt = 0
-        samples = []
-        it = substrate.query_map(module="SubtensorModule", storage_function="Lock")
-        for k, v in it:
-            cnt += 1
-            val = v.value if hasattr(v, "value") else v
-            key = k.value if hasattr(k, "value") else k
-            samples.append({"key": str(key)[:150], "val": str(val)[:160], "vt": type(val).__name__})
-            if cnt >= 8:
-                break
-        lock_out["fullSample"] = samples
-    except Exception as e:
-        lock_out["full_error"] = str(e)[:220]
-    # (c) filtered by netuid (best-effort — may fail if netuid isn't key #1)
-    try:
-        cnt = 0
-        samples = []
-        it = substrate.query_map(module="SubtensorModule", storage_function="Lock", params=[netuid])
-        for k, v in it:
-            cnt += 1
-            if len(samples) < 5:
-                val = v.value if hasattr(v, "value") else v
-                samples.append({"key": str(k.value if hasattr(k, "value") else k)[:130], "val": str(val)[:160]})
-        lock_out["byNetuid"] = {"count": cnt, "samples": samples}
-    except Exception as e:
-        lock_out["byNetuid_error"] = str(e)[:220]
-    # (d) compute this netuid's total by full-map iteration, filtering on the
-    # middle (Identity-hashed u16) netuid key.
-    try:
-        scanned = 0
-        matched = 0
-        total_locked_rao = 0
-        king_locked = 0
-        king_accts = []
-        posns = {}
-        it = substrate.query_map(module="SubtensorModule", storage_function="Lock")
-        for k, v in it:
-            scanned += 1
-            key = k.value if hasattr(k, "value") else k
-            comps = list(key) if isinstance(key, (tuple, list)) else [key]
-            nid = None
-            for idx, c in enumerate(comps):
-                if isinstance(c, int):
-                    nid = c
-                    posns[idx] = posns.get(idx, 0) + 1
-                    break
-            if nid == netuid:
-                val = v.value if hasattr(v, "value") else v
-                lm = val.get("locked_mass", 0) if isinstance(val, dict) else 0
-                matched += 1
-                total_locked_rao += lm
-                if lm > king_locked:
-                    king_locked = lm
-                    # decode every non-int component so we can see which key
-                    # position is the hotkey vs coldkey.
-                    king_accts = [_ss58_from_key(c) for c in comps if not isinstance(c, int)]
-            if scanned >= 60000:
-                break
-        lock_out["computed"] = {
-            "scanned": scanned,
-            "matched": matched,
-            "totalLockedAlpha": round(total_locked_rao / 1e9, 4),
-            "kingLockedAlpha": round(king_locked / 1e9, 4),
-            "netuidKeyPositions": posns,
-            "kingAccounts": king_accts,
-        }
-    except Exception as e:
-        lock_out["computed_error"] = str(e)[:220]
-    out["lock"] = lock_out
-    return out
 
 
 # In-memory cache of the validator coldkey set. Populated by /validator-coldkeys
