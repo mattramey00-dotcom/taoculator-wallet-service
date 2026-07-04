@@ -27,7 +27,8 @@ def get_subtensor():
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    # build marker — bump to force/verify a Render redeploy
+    return {"ok": True, "build": "conv-agg-v2"}
 
 
 @app.get("/all-subnets")
