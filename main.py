@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "conv-agg-v2"}
+    return {"ok": True, "build": "conv-coldkey-v3"}
 
 
 @app.get("/all-subnets")
@@ -708,12 +708,17 @@ async def conviction(netuid: int):
         return {
             "ok": True,
             "netuid": netuid,
+            # NOTE: SubtensorModule.Lock is keyed by the locker's COLDKEY, so
+            # "king" here is the top-locking coldkey — compare it to the owner
+            # COLDKEY (SubnetOwner), not the owner hotkey. We surface the owner
+            # coldkey in the ownerHotkey field so the panel's King/Owner rows are
+            # comparable (both coldkeys).
             "kingHotkey": king_hotkey,
             "kingLockedAlpha": round(king_locked, 6),
             "kingConviction": round(king_conviction, 6),
-            "ownerHotkey": owner_hotkey,
+            "ownerHotkey": owner_coldkey or owner_hotkey,
             "ownerColdkey": owner_coldkey,
-            "kingIsOwner": (king_hotkey is not None and owner_hotkey is not None and king_hotkey == owner_hotkey),
+            "kingIsOwner": (king_hotkey is not None and owner_coldkey is not None and king_hotkey == owner_coldkey),
             "totalLockedAlpha": round(total_locked, 6),
             "totalConviction": round(total_conviction, 6),
             "hotkeyCount": hotkey_count,
