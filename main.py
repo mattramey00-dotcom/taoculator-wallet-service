@@ -797,6 +797,7 @@ async def conviction_probe(netuid: int):
         matched = 0
         total_locked_rao = 0
         king_locked = 0
+        king_accts = []
         posns = {}
         it = substrate.query_map(module="SubtensorModule", storage_function="Lock")
         for k, v in it:
@@ -816,6 +817,9 @@ async def conviction_probe(netuid: int):
                 total_locked_rao += lm
                 if lm > king_locked:
                     king_locked = lm
+                    # decode every non-int component so we can see which key
+                    # position is the hotkey vs coldkey.
+                    king_accts = [_ss58_from_key(c) for c in comps if not isinstance(c, int)]
             if scanned >= 60000:
                 break
         lock_out["computed"] = {
@@ -824,6 +828,7 @@ async def conviction_probe(netuid: int):
             "totalLockedAlpha": round(total_locked_rao / 1e9, 4),
             "kingLockedAlpha": round(king_locked / 1e9, 4),
             "netuidKeyPositions": posns,
+            "kingAccounts": king_accts,
         }
     except Exception as e:
         lock_out["computed_error"] = str(e)[:220]
