@@ -28,7 +28,34 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "bt11-upgrade-v8"}
+    return {"ok": True, "build": "bt11-introspect-v9"}
+
+
+@app.get("/debug/methods")
+def debug_methods():
+    """TEMPORARY (2026-07-18): list Subtensor/substrate method names on the live
+    bittensor 11.0.0 so we can map the renamed staking API (and check the other
+    endpoints' calls) without guessing. Remove after /wallet is adapted."""
+    try:
+        sub = get_subtensor()
+        def names(obj, needles):
+            out = []
+            for m in dir(obj):
+                if m.startswith("_"):
+                    continue
+                low = m.lower()
+                if any(n in low for n in needles):
+                    out.append(m)
+            return sorted(out)
+        return {
+            "ok": True,
+            "subtensor_stake": names(sub, ["stake"]),
+            "subtensor_subnet": names(sub, ["subnet", "all_subnets", "metagraph"]),
+            "substrate_query": names(getattr(sub, "substrate", object()), ["query", "event", "metadata", "runtime", "block", "chain_head"]),
+        }
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()[-1200:]})
 
 
 @app.get("/all-subnets")
