@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "clean-v4"}
+    return {"ok": True, "build": "stake-tuple-fix-v5"}
 
 
 @app.get("/all-subnets")
@@ -71,8 +71,55 @@ async def all_subnets_endpoint():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def _stake_decode_debug(stake_info):
+    """TEMPORARY (2026-07-18): report the raw decode shape of the first stake
+    record and the installed async-substrate-interface version, so we can pin
+    the dep to exactly what's live. Remove once requirements.txt is pinned."""
+    try:
+        from importlib.metadata import version as _pkg_version
+    except Exception:
+        _pkg_version = None
+    asi_ver = "unknown"
+    if _pkg_version is not None:
+        try:
+            asi_ver = _pkg_version("async-substrate-interface")
+        except Exception:
+            asi_ver = "not_found"
+    out = {"async_substrate_interface": asi_ver}
+    try:
+        if stake_info:
+            r = stake_info[0]
+            nu = getattr(r, "netuid", None)
+            st = getattr(r, "stake", None)
+            out["netuid_type"] = type(nu).__name__
+            out["netuid_repr"] = repr(nu)[:80]
+            out["stake_type"] = type(st).__name__
+            out["stake_repr"] = repr(st)[:80]
+    except Exception as e:
+        out["error"] = str(e)[:120]
+    return out
+
+
+def _as_scalar(v):
+    """Unwrap single-element tuples/lists to their inner value.
+
+    Some async-substrate-interface 1.x releases (pulled in via the `<2.0.0`
+    range in requirements.txt when Render redeploys) decode StakeInfo scalar
+    fields — notably `netuid` and `stake` — as 1-element tuples like `(8,)`
+    instead of the bare `8`. That made `int(info.netuid)` raise
+    "int() argument ... not 'tuple'" and 500 the /wallet endpoint for any
+    coldkey that actually has stake. Unwrap so int()/float() coercion works
+    regardless of which decode shape the installed dep produces."""
+    seen = 0
+    while isinstance(v, (tuple, list)) and len(v) == 1 and seen < 5:
+        v = v[0]
+        seen += 1
+    return v
+
+
 def _balance_to_float(b):
     """Convert a bittensor Balance / Decimal / number to float TAO."""
+    b = _as_scalar(b)
     if b is None:
         return 0.0
     if hasattr(b, "tao"):
@@ -130,12 +177,21 @@ async def wallet(address: str):
         root_stake_tao = 0.0
         subnet_map = {}
 
+        skipped_records = 0
         for info in stake_info:
-            netuid = int(info.netuid)
             try:
-                alpha_amount = float(info.stake)
-            except:
-                alpha_amount = 0.0
+                netuid = int(_as_scalar(getattr(info, "netuid", -1)))
+            except (TypeError, ValueError):
+                # Undecodable netuid — skip this record rather than 500 the
+                # whole wallet. Counted in _debug so a decode regression is
+                # visible instead of silently dropping positions.
+                skipped_records += 1
+                continue
+            # Route stake through _balance_to_float (handles Balance / number /
+            # 1-tuple) instead of a bare float() that silently fell back to 0.0
+            # — that fallback would have turned a stake-decode drift into
+            # wrong-but-plausible zero balances rather than a loud failure.
+            alpha_amount = _balance_to_float(getattr(info, "stake", None))
 
             if netuid == 0:
                 root_stake_tao += alpha_amount
@@ -170,7 +226,12 @@ async def wallet(address: str):
                 "source": "subtensor-onchain",
                 "stakeRecords": len(stake_info),
                 "alphaSubnets": len(alpha_positions),
-                "pricedSubnets": sum(1 for p in alpha_positions if p["alphaPriceTao"] > 0)
+                "pricedSubnets": sum(1 for p in alpha_positions if p["alphaPriceTao"] > 0),
+                "skippedRecords": skipped_records,
+                # TEMPORARY (2026-07-18): confirm the decode shape + the exact
+                # async-substrate-interface version live on Render, so we can
+                # pin it. Remove once pinned. See _as_scalar().
+                "decode": _stake_decode_debug(stake_info),
             }
         }
 
