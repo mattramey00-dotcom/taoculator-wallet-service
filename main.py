@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "bt10_5-fallback-v11"}
+    return {"ok": True, "build": "bt10_5-asi2x-v12"}
 
 
 @app.get("/debug/methods")
