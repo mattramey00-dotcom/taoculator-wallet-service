@@ -28,39 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "bt10_5-asi2x-v12"}
-
-
-@app.get("/debug/methods")
-def debug_methods():
-    """TEMPORARY (2026-07-18): list Subtensor/substrate method names on the live
-    bittensor 11.0.0 so we can map the renamed staking API (and check the other
-    endpoints' calls) without guessing. Remove after /wallet is adapted."""
-    try:
-        sub = get_subtensor()
-        def names(obj, needles):
-            out = []
-            for m in dir(obj):
-                if m.startswith("_"):
-                    continue
-                low = m.lower()
-                if any(n in low for n in needles):
-                    out.append(m)
-            return sorted(out)
-        sub_all = [m for m in dir(sub) if not m.startswith("_")]
-        substrate = getattr(sub, "substrate", None)
-        sub_all_methods = [m for m in sub_all if callable(getattr(sub, m, None))]
-        return {
-            "ok": True,
-            "bittensor": _stake_decode_debug([]).get("bittensor"),
-            "subtensor_public": sub_all,
-            "subtensor_callables": sub_all_methods,
-            "substrate_type": type(substrate).__name__ if substrate is not None else None,
-            "substrate_public": [m for m in dir(substrate) if not m.startswith("_")] if substrate is not None else [],
-        }
-    except Exception as e:
-        import traceback
-        raise HTTPException(status_code=500, detail={"error": str(e), "trace": traceback.format_exc()[-1200:]})
+    return {"ok": True, "build": "bt10.5.0-clean-v13"}
 
 
 @app.get("/all-subnets")
@@ -103,51 +71,17 @@ async def all_subnets_endpoint():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-def _stake_decode_debug(stake_info):
-    """TEMPORARY (2026-07-18): report the raw decode shape of the first stake
-    record and the installed async-substrate-interface version, so we can pin
-    the dep to exactly what's live. Remove once requirements.txt is pinned."""
-    try:
-        from importlib.metadata import version as _pkg_version
-    except Exception:
-        _pkg_version = None
-    asi_ver = "unknown"
-    if _pkg_version is not None:
-        try:
-            asi_ver = _pkg_version("async-substrate-interface")
-        except Exception:
-            asi_ver = "not_found"
-    bt_ver = "unknown"
-    if _pkg_version is not None:
-        try:
-            bt_ver = _pkg_version("bittensor")
-        except Exception:
-            bt_ver = "not_found"
-    out = {"bittensor": bt_ver, "async_substrate_interface": asi_ver}
-    try:
-        if stake_info:
-            r = stake_info[0]
-            nu = getattr(r, "netuid", None)
-            st = getattr(r, "stake", None)
-            out["netuid_type"] = type(nu).__name__
-            out["netuid_repr"] = repr(nu)[:80]
-            out["stake_type"] = type(st).__name__
-            out["stake_repr"] = repr(st)[:80]
-    except Exception as e:
-        out["error"] = str(e)[:120]
-    return out
-
-
 def _as_scalar(v):
     """Unwrap single-element tuples/lists to their inner value.
 
-    Some async-substrate-interface 1.x releases (pulled in via the `<2.0.0`
-    range in requirements.txt when Render redeploys) decode StakeInfo scalar
-    fields — notably `netuid` and `stake` — as 1-element tuples like `(8,)`
-    instead of the bare `8`. That made `int(info.netuid)` raise
-    "int() argument ... not 'tuple'" and 500 the /wallet endpoint for any
-    coldkey that actually has stake. Unwrap so int()/float() coercion works
-    regardless of which decode shape the installed dep produces."""
+    Defense-in-depth against substrate-decode drift. Under bittensor 10.5.0 +
+    async-substrate-interface 2.2.1 (both now pinned exactly) StakeInfo scalar
+    fields decode as plain ints/Balances and this is a no-op. It exists because
+    an earlier dep (async-substrate-interface 1.6.x, floated in by an unpinned
+    range) decoded `netuid`/`stake` as 1-tuples like `(8,)`, which made
+    `int(netuid)` raise "int() argument ... not 'tuple'" and 500 /wallet for
+    every staked coldkey. Kept so a future decode-shape change degrades
+    gracefully instead of hard-failing."""
     seen = 0
     while isinstance(v, (tuple, list)) and len(v) == 1 and seen < 5:
         v = v[0]
@@ -266,23 +200,11 @@ async def wallet(address: str):
                 "alphaSubnets": len(alpha_positions),
                 "pricedSubnets": sum(1 for p in alpha_positions if p["alphaPriceTao"] > 0),
                 "skippedRecords": skipped_records,
-                # TEMPORARY (2026-07-18): confirm the decode shape + the exact
-                # async-substrate-interface version live on Render, so we can
-                # pin it. Remove once pinned. See _as_scalar().
-                "decode": _stake_decode_debug(stake_info),
             }
         }
 
     except Exception as e:
-        # TEMPORARY (2026-07-18): surface the traceback so we can see which
-        # int()/decode call actually fails (the SDK may raise inside
-        # get_stake_info_for_coldkey before our loop runs). Revert to
-        # detail=str(e) once diagnosed.
-        import traceback
-        raise HTTPException(status_code=500, detail={
-            "error": str(e),
-            "trace": traceback.format_exc()[-1600:],
-        })
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Recent on-chain activity (stake/unstake ticker) ─────────────────────

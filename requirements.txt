@@ -7,10 +7,13 @@ uvicorn==0.29.0
 # .substrate — this service is built on; verified live 2026-07-18). 10.5.0
 # keeps that 10.x API while being recent enough to parse the current chain.
 bittensor==10.5.0
-# Do NOT pin async-substrate-interface here: bittensor 10.5.0 requires
-# >=2.0.4,<3.0.0 (it migrated to the 2.x / cyscale line and dropped scalecodec,
-# so the old scalecodec-vs-cyscale conflict that forced a <2.0 pin no longer
-# applies). A leftover `<2.0.0` line here makes pip resolution UNSATISFIABLE and
-# the Render build fails silently, leaving the previous container running — which
-# is exactly what happened on the first 10.5.0 attempt. Let 10.5.0 resolve it,
-# then re-pin to the RESOLVED exact 2.x version once confirmed (see _debug.decode).
+# Pin async-substrate-interface to the EXACT resolved version, not bittensor
+# 10.5.0's `>=2.0.4,<3.0.0` range. This is the whole lesson of the 2026-07-18
+# outage: the original /wallet 500 came from this dep silently floating (1.5.x
+# -> 1.6.4) on a Render redeploy and changing how StakeInfo decodes, while the
+# service's own code never changed. bittensor is pinned exactly; pin its
+# substrate stack exactly too so a rebuild can't drift again. 2.2.1 is the
+# version that resolved under 10.5.0 and is verified working end-to-end
+# (netuid decodes as int, all endpoints green). Bump deliberately alongside a
+# bittensor upgrade, never implicitly. (10.5.0 uses cyscale, not scalecodec.)
+async-substrate-interface==2.2.1
