@@ -1,9 +1,20 @@
 fastapi==0.111.0
 uvicorn==0.29.0
 bittensor==10.1.0
-# Pin the transitive dep: async-substrate-interface released 2.0.0 on
-# 2026-04-19 which replaces scalecodec with cyscale. bittensor 10.1.0
-# still requires scalecodec==1.2.12, so having both installed raises
-# "Conflict detected: 'scalecodec' ... conflicts with 'cyscale'" at
-# import time. Pin <2.0 until bittensor catches up.
-async-substrate-interface<2.0.0
+# Pin the transitive dep to an EXACT version, not a range. Two reasons:
+#
+# 1. (original) async-substrate-interface 2.0.0 (2026-04-19) replaced
+#    scalecodec with cyscale. bittensor 10.1.0 still requires
+#    scalecodec==1.2.12, so both installed raises "Conflict detected:
+#    'scalecodec' ... conflicts with 'cyscale'" at import — must stay <2.0.
+#
+# 2. (2026-07-18) Within the old `<2.0.0` range, 1.6.x decodes StakeInfo
+#    scalar fields as 1-element tuples like (8,). bittensor 10.1.0's
+#    StakeInfo.from_dict does `int(netuid)` on that and raises
+#    "int() argument ... not 'tuple'", 500ing /wallet for every coldkey
+#    that has stake. A forced Render redeploy silently floated the dep from
+#    a working 1.5.x up to 1.6.4 and broke a service whose own code never
+#    changed. bittensor 10.1.0 declares `>=1.5.15`; pin to that exact floor
+#    (the version it shipped against) so a redeploy can't drift again.
+#    Revisit when bittensor is upgraded past 10.1.0.
+async-substrate-interface==1.5.15

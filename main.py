@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "stake-trace-v6"}
+    return {"ok": True, "build": "asi-pin-1.5.15-v7"}
 
 
 @app.get("/all-subnets")
