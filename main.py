@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "stake-tuple-fix-v5"}
+    return {"ok": True, "build": "stake-trace-v6"}
 
 
 @app.get("/all-subnets")
@@ -236,7 +236,15 @@ async def wallet(address: str):
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # TEMPORARY (2026-07-18): surface the traceback so we can see which
+        # int()/decode call actually fails (the SDK may raise inside
+        # get_stake_info_for_coldkey before our loop runs). Revert to
+        # detail=str(e) once diagnosed.
+        import traceback
+        raise HTTPException(status_code=500, detail={
+            "error": str(e),
+            "trace": traceback.format_exc()[-1600:],
+        })
 
 
 # ── Recent on-chain activity (stake/unstake ticker) ─────────────────────
