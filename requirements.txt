@@ -1,10 +1,14 @@
 fastapi==0.111.0
 uvicorn==0.29.0
-bittensor==11.0.0
-# NOTE (2026-07-18): async-substrate-interface is intentionally NOT pinned
-# here anymore — bittensor 11.0.0 (below) owns the substrate stack via
-# bittensor-core and resolves its own compatible 2.x (cyscale) line. Pinning
-# it ourselves to a 1.x now would conflict. Re-pin to the RESOLVED version
-# once the 11.0.0 deploy is confirmed working (read it from _debug.decode),
-# so a future redeploy can't drift again — that drift is exactly what broke
-# /wallet under 10.1.0.
+# bittensor 10.5.0 (2026-06-25) — the newest 10.x. Chosen over both 10.1.0
+# (whose StakeInfo decoder int(netuid)'d on a tuple, 500ing /wallet after the
+# chain runtime upgraded) and 11.0.0 (a ground-up rewrite that deletes the
+# high-level API — get_stake_info_for_coldkey, all_subnets, get_metagraph_info,
+# .substrate — this service is built on; verified live 2026-07-18). 10.5.0
+# keeps that 10.x API while being recent enough to parse the current chain.
+bittensor==10.5.0
+# Let bittensor 10.5.0 resolve its own async-substrate-interface (still the 1.x
+# / scalecodec line — must stay <2.0.0 to avoid the cyscale conflict). Re-pin
+# to the RESOLVED exact version once this deploy is confirmed working, so a
+# future Render redeploy can't float it and re-break decode (see _debug.decode).
+async-substrate-interface<2.0.0
