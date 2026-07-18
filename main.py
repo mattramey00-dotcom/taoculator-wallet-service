@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "bt11-introspect-v9"}
+    return {"ok": True, "build": "bt11-introspect-v10"}
 
 
 @app.get("/debug/methods")
@@ -47,11 +47,16 @@ def debug_methods():
                 if any(n in low for n in needles):
                     out.append(m)
             return sorted(out)
+        sub_all = [m for m in dir(sub) if not m.startswith("_")]
+        substrate = getattr(sub, "substrate", None)
+        sub_all_methods = [m for m in sub_all if callable(getattr(sub, m, None))]
         return {
             "ok": True,
-            "subtensor_stake": names(sub, ["stake"]),
-            "subtensor_subnet": names(sub, ["subnet", "all_subnets", "metagraph"]),
-            "substrate_query": names(getattr(sub, "substrate", object()), ["query", "event", "metadata", "runtime", "block", "chain_head"]),
+            "bittensor": _stake_decode_debug([]).get("bittensor"),
+            "subtensor_public": sub_all,
+            "subtensor_callables": sub_all_methods,
+            "substrate_type": type(substrate).__name__ if substrate is not None else None,
+            "substrate_public": [m for m in dir(substrate) if not m.startswith("_")] if substrate is not None else [],
         }
     except Exception as e:
         import traceback
