@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "asi-pin-1.5.15-v7"}
+    return {"ok": True, "build": "bt11-upgrade-v8"}
 
 
 @app.get("/all-subnets")
@@ -85,7 +85,13 @@ def _stake_decode_debug(stake_info):
             asi_ver = _pkg_version("async-substrate-interface")
         except Exception:
             asi_ver = "not_found"
-    out = {"async_substrate_interface": asi_ver}
+    bt_ver = "unknown"
+    if _pkg_version is not None:
+        try:
+            bt_ver = _pkg_version("bittensor")
+        except Exception:
+            bt_ver = "not_found"
+    out = {"bittensor": bt_ver, "async_substrate_interface": asi_ver}
     try:
         if stake_info:
             r = stake_info[0]
