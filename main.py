@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "bt10.5.0-clean-v13"}
+    return {"ok": True, "build": "stake-detail-v14"}
 
 
 @app.get("/all-subnets")
@@ -203,6 +203,50 @@ async def wallet(address: str):
             }
         }
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stake-detail")
+async def stake_detail(address: str):
+    """Per-(hotkey, netuid) stake breakdown.
+
+    /wallet aggregates by netuid and drops the hotkey (returns validators: []).
+    This exposes which validator (hotkey) each alpha position is delegated to,
+    plus the pending `emission` on that stake and whether it's registered — the
+    inputs for a validator-selection / yield analysis. Same underlying
+    get_stake_info_for_coldkey call, just not collapsed."""
+    if not address or not address.startswith("5") or len(address) < 47:
+        raise HTTPException(status_code=400, detail="Invalid SS58 address")
+    try:
+        sub = get_subtensor()
+        stake_info = sub.get_stake_info_for_coldkey(coldkey_ss58=address)
+        pool_prices = _fetch_pool_prices(sub)
+        out = []
+        skipped = 0
+        for info in stake_info:
+            try:
+                netuid = int(_as_scalar(getattr(info, "netuid", -1)))
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            alpha = _balance_to_float(getattr(info, "stake", None))
+            if alpha <= 0.000001:
+                continue
+            hotkey = _as_scalar(getattr(info, "hotkey_ss58", None)) or _as_scalar(getattr(info, "hotkey", None))
+            emission = _balance_to_float(getattr(info, "emission", None))
+            price = float(pool_prices.get(netuid, 0.0) or 0.0)
+            out.append({
+                "netuid": netuid,
+                "hotkey": hotkey,
+                "alpha": round(alpha, 6),
+                "emission": round(emission, 9),
+                "taoValue": round(alpha * price, 6),
+                "isRegistered": bool(_as_scalar(getattr(info, "is_registered", False))),
+            })
+        out.sort(key=lambda x: x["taoValue"], reverse=True)
+        return {"ok": True, "address": address, "positions": out,
+                "_debug": {"records": len(stake_info), "skipped": skipped}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
