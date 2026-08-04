@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "stake-detail-v14"}
+    return {"ok": True, "build": "validator-info-v15"}
 
 
 @app.get("/all-subnets")
@@ -247,6 +247,79 @@ async def stake_detail(address: str):
         out.sort(key=lambda x: x["taoValue"], reverse=True)
         return {"ok": True, "address": address, "positions": out,
                 "_debug": {"records": len(stake_info), "skipped": skipped}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/validator-info")
+async def validator_info(hotkeys: str):
+    """Take (commission) + total stake + owner + identity name per validator,
+    for a comma-separated list of hotkeys. Feeds the "which validator to stay
+    with" decision: under Root Reborn a validator's take directly reduces the
+    TAO return it delivers to stakers, and total stake / a real identity flag a
+    genuine operator vs an anon. Defensive + _debug so the on-chain shape is
+    verifiable on the first call."""
+    hks = [h.strip() for h in (hotkeys or "").split(",") if h.strip().startswith("5")][:40]
+    if not hks:
+        raise HTTPException(status_code=400, detail="hotkeys param required (comma-separated ss58)")
+    try:
+        sub = get_subtensor()
+        # Identity map — method name has churned across versions; try a few.
+        ident = {}
+        for m in ("get_delegate_identities", "get_all_delegate_identities", "get_delegate_identity"):
+            fn = getattr(sub, m, None)
+            if fn:
+                try:
+                    ident = fn() or {}
+                    break
+                except Exception:
+                    pass
+
+        def name_for(hk, owner):
+            for k in (hk, owner):
+                v = ident.get(k) if isinstance(ident, dict) else None
+                if v is None:
+                    continue
+                nm = getattr(v, "name", None) or (v.get("name") if isinstance(v, dict) else None)
+                if nm:
+                    return str(nm)[:60]
+            return None
+
+        out = []
+        dbg = None
+        for hk in hks:
+            rec = {"hotkey": hk}
+            d = None
+            try:
+                d = sub.get_delegate_by_hotkey(hk)
+            except Exception as e:
+                rec["error"] = "lookup: " + str(e)[:90]
+            if d is not None:
+                take = _as_scalar(getattr(d, "take", None))
+                try:
+                    rec["takePct"] = round(float(take) * 100, 3) if take is not None else None
+                except Exception:
+                    rec["takePct"] = None
+                rec["totalStakeTao"] = round(_balance_to_float(getattr(d, "total_stake", None)), 4)
+                owner = _as_scalar(getattr(d, "owner_ss58", None)) or _as_scalar(getattr(d, "owner", None))
+                rec["owner"] = str(owner) if owner else None
+                noms = getattr(d, "nominators", None)
+                try:
+                    rec["nominators"] = len(noms)
+                except Exception:
+                    rec["nominators"] = None
+                regs = getattr(d, "registrations", None)
+                try:
+                    rec["subnets"] = [int(_as_scalar(x)) for x in list(regs)[:32]]
+                except Exception:
+                    rec["subnets"] = None
+                rec["name"] = name_for(hk, rec.get("owner"))
+                if dbg is None:
+                    dbg = {"delegate_attrs": [a for a in dir(d) if not a.startswith("_")][:40],
+                           "ident_type": type(ident).__name__,
+                           "ident_size": (len(ident) if hasattr(ident, "__len__") else None)}
+            out.append(rec)
+        return {"ok": True, "validators": out, "_debug": dbg}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
