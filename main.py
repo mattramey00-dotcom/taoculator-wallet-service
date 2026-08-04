@@ -28,7 +28,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "validator-info-v15"}
+    return {"ok": True, "build": "validator-info-v16"}
 
 
 @app.get("/all-subnets")
@@ -300,7 +300,18 @@ async def validator_info(hotkeys: str):
                     rec["takePct"] = round(float(take) * 100, 3) if take is not None else None
                 except Exception:
                     rec["takePct"] = None
-                rec["totalStakeTao"] = round(_balance_to_float(getattr(d, "total_stake", None)), 4)
+                # total_stake and return_per_1000 are per-subnet dicts in dTAO
+                # (or a scalar on older chains) — coerce either shape to a float.
+                def _sumbal(x):
+                    if isinstance(x, dict):
+                        return sum(_balance_to_float(v) for v in x.values())
+                    if isinstance(x, (list, tuple)):
+                        return sum(_balance_to_float(v) for v in x)
+                    return _balance_to_float(x)
+                rec["totalStakeTao"] = round(_sumbal(getattr(d, "total_stake", None)), 4)
+                # return_per_1000 = the validator's return to stakers per 1000 TAO
+                # staked — the Root Reborn "return for stakers" signal, net of take.
+                rec["returnPer1000"] = round(_sumbal(getattr(d, "return_per_1000", None)), 6)
                 owner = _as_scalar(getattr(d, "owner_ss58", None)) or _as_scalar(getattr(d, "owner", None))
                 rec["owner"] = str(owner) if owner else None
                 noms = getattr(d, "nominators", None)
@@ -310,9 +321,16 @@ async def validator_info(hotkeys: str):
                     rec["nominators"] = None
                 regs = getattr(d, "registrations", None)
                 try:
-                    rec["subnets"] = [int(_as_scalar(x)) for x in list(regs)[:32]]
+                    rec["subnets"] = [int(_as_scalar(x)) for x in list(regs)[:64]]
                 except Exception:
                     rec["subnets"] = None
+                # validator_permits: subnets where it actually holds a validator
+                # permit (i.e. is doing real validation), not just registered.
+                perms = getattr(d, "validator_permits", None)
+                try:
+                    rec["permitSubnets"] = len([1 for x in perms if bool(_as_scalar(x)) or x is True]) if perms is not None else None
+                except Exception:
+                    rec["permitSubnets"] = None
                 rec["name"] = name_for(hk, rec.get("owner"))
                 if dbg is None:
                     dbg = {"delegate_attrs": [a for a in dir(d) if not a.startswith("_")][:40],
