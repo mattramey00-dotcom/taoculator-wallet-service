@@ -1,4 +1,5 @@
 import os
+import time
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +29,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "validator-info-v16"}
+    return {"ok": True, "build": "pool-price-cache-v17"}
 
 
 @app.get("/all-subnets")
@@ -105,19 +106,34 @@ def _balance_to_float(b):
         return 0.0
 
 
+_pool_price_cache = {"ts": 0.0, "prices": {}}
+_POOL_PRICE_CACHE_TTL = 30  # seconds
+
 def _fetch_pool_prices(sub):
-    """Query all subnet pools once and return {netuid: price_in_tao}.
+    """Query all subnet pools and return {netuid: price_in_tao}, cached briefly.
 
     Price = tao_in_pool / alpha_in_pool for each subnet AMM. This is the
     same computation Taostats performs server-side; doing it here keeps
     wallet valuation fully on-chain and drops the frontend's dependency
     on the /taostats worker for current prices.
+
+    Every /wallet call used to re-fetch this from chain, even though the
+    prices are identical across every wallet. all_subnets() alone is two
+    runtime calls (get_all_dynamic_info + get_subnet_prices), so a 10-wallet
+    "Refresh All" was issuing the same ~130-subnet price query 10x back to
+    back — enough to trip OnFinality's per-second burst limit even with a
+    valid API key applied. A short TTL cache collapses that to one fetch
+    per refresh cycle.
     """
+    now = time.time()
+    if _pool_price_cache["prices"] and (now - _pool_price_cache["ts"]) < _POOL_PRICE_CACHE_TTL:
+        return _pool_price_cache["prices"]
     prices = {}
     try:
         subnets = sub.all_subnets()
     except Exception:
-        return prices
+        # Transient failure — serve the last known prices rather than zeros.
+        return _pool_price_cache["prices"]
     for info in (subnets or []):
         try:
             n = int(getattr(info, "netuid", -1))
@@ -134,6 +150,9 @@ def _fetch_pool_prices(sub):
                 prices[n] = p
         except Exception:
             continue
+    if prices:
+        _pool_price_cache["ts"] = now
+        _pool_price_cache["prices"] = prices
     return prices
 
 
