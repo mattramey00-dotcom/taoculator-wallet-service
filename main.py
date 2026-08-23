@@ -29,7 +29,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "pool-price-cache-v17"}
+    return {"ok": True, "build": "subnet-identity-cache-v18"}
 
 
 @app.get("/all-subnets")
@@ -511,8 +511,25 @@ def decode_field(val):
         return val.strip() or None
     return str(val).strip() or None
 
+_subnet_identity_cache = {}  # netuid -> {"ts": float, "data": {...}}
+_SUBNET_IDENTITY_CACHE_TTL = 6 * 3600  # 6h — names/logos essentially never change
+
 @app.get("/subnet-identity/{netuid}")
 async def subnet_identity(netuid: int):
+    """Subnet name + logo, cached for hours.
+
+    The frontend loops this over ~128 subnets in a burst on every cold
+    warmup (portfolio/periodic-table subnet-name resolution). With no
+    caching, that burst alone was enough to trip OnFinality's rate limit
+    around subnet #14-15 every time — everything after silently fell back
+    to "SN<n>" placeholders instead of the real name. Since identity data
+    is effectively static, a long TTL eliminates the repeat chain calls
+    entirely after the first warmup.
+    """
+    now = time.time()
+    cached = _subnet_identity_cache.get(netuid)
+    if cached and (now - cached["ts"]) < _SUBNET_IDENTITY_CACHE_TTL:
+        return cached["data"]
     try:
         sub = get_subtensor()
         result = sub.substrate.query(
@@ -531,19 +548,20 @@ async def subnet_identity(netuid: int):
                 raw = result.serialize()
 
         if raw is None:
-            return {"ok": True, "netuid": netuid, "logo_url": None, "name": None}
+            data = {"ok": True, "netuid": netuid, "logo_url": None, "name": None}
+        else:
+            logo_url = decode_field(raw.get("logo_url") or raw.get("image_url") or raw.get("icon_url"))
+            name = decode_field(raw.get("subnet_name") or raw.get("name") or raw.get("subnetName"))
+            data = {"ok": True, "netuid": netuid, "logo_url": logo_url, "name": name}
 
-        logo_url = decode_field(raw.get("logo_url") or raw.get("image_url") or raw.get("icon_url"))
-        name = decode_field(raw.get("subnet_name") or raw.get("name") or raw.get("subnetName"))
-
-        return {
-            "ok": True,
-            "netuid": netuid,
-            "logo_url": logo_url,
-            "name": name
-        }
+        _subnet_identity_cache[netuid] = {"ts": now, "data": data}
+        return data
 
     except Exception as e:
+        # Transient failure (e.g. rate limit) — serve stale cache if we have
+        # it rather than a blank result the frontend can't do anything with.
+        if cached:
+            return cached["data"]
         return {"ok": True, "netuid": netuid, "logo_url": None, "name": None, "error": str(e)[:200]}
 
 
