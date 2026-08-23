@@ -29,7 +29,7 @@ def get_subtensor():
 @app.get("/health")
 def health():
     # build marker — bump to force/verify a Render redeploy
-    return {"ok": True, "build": "subnet-identity-cache-v18"}
+    return {"ok": True, "build": "subnet-identity-bulk-v19"}
 
 
 @app.get("/all-subnets")
@@ -513,23 +513,72 @@ def decode_field(val):
 
 _subnet_identity_cache = {}  # netuid -> {"ts": float, "data": {...}}
 _SUBNET_IDENTITY_CACHE_TTL = 6 * 3600  # 6h — names/logos essentially never change
+_subnet_identity_bulk_ts = 0.0  # last time a full query_map refresh ran
+
+def _decode_identity_raw(raw):
+    if raw is None:
+        return None, None
+    logo_url = decode_field(raw.get("logo_url") or raw.get("image_url") or raw.get("icon_url"))
+    name = decode_field(raw.get("subnet_name") or raw.get("name") or raw.get("subnetName"))
+    return logo_url, name
+
+def _refresh_all_subnet_identities():
+    """One query_map call resolves every subnet's identity at once.
+
+    The frontend previously drove this via ~128 sequential per-netuid chain
+    queries (one per subnet) on every cold warmup — that burst alone was
+    enough to trip OnFinality's rate limit around subnet #14-15 every time,
+    long before a per-netuid TTL cache could help (a Render restart wipes
+    the in-memory cache, so the very next warmup hit the same burst again).
+    Batching into a single storage-map iteration removes the burst itself
+    instead of just caching around it.
+    """
+    global _subnet_identity_bulk_ts
+    _subnet_identity_bulk_ts = time.time()  # set before the call so a request
+    # arriving while this is still in flight doesn't also trigger a refresh
+    sub = get_subtensor()
+    result = sub.substrate.query_map(
+        module="SubtensorModule",
+        storage_function="SubnetIdentitiesV3",
+    )
+    now = time.time()
+    for key, value in result:
+        try:
+            netuid = int(_as_scalar(key))
+        except (TypeError, ValueError):
+            continue
+        raw = None
+        if isinstance(value, dict):
+            raw = value
+        elif hasattr(value, 'value') and value.value is not None:
+            raw = value.value
+        elif hasattr(value, 'serialize'):
+            raw = value.serialize()
+        logo_url, name = _decode_identity_raw(raw)
+        _subnet_identity_cache[netuid] = {"ts": now, "data": {"ok": True, "netuid": netuid, "logo_url": logo_url, "name": name}}
 
 @app.get("/subnet-identity/{netuid}")
 async def subnet_identity(netuid: int):
-    """Subnet name + logo, cached for hours.
-
-    The frontend loops this over ~128 subnets in a burst on every cold
-    warmup (portfolio/periodic-table subnet-name resolution). With no
-    caching, that burst alone was enough to trip OnFinality's rate limit
-    around subnet #14-15 every time — everything after silently fell back
-    to "SN<n>" placeholders instead of the real name. Since identity data
-    is effectively static, a long TTL eliminates the repeat chain calls
-    entirely after the first warmup.
-    """
     now = time.time()
     cached = _subnet_identity_cache.get(netuid)
     if cached and (now - cached["ts"]) < _SUBNET_IDENTITY_CACHE_TTL:
         return cached["data"]
+    # Cache miss/stale — refresh EVERY subnet in one chain interaction. The
+    # first subnet-identity request in a warmup pays for this once; since the
+    # frontend fetches sequentially (awaits each response before firing the
+    # next), the other ~127 in the same burst land after this completes and
+    # are pure cache hits. 60s floor keeps a failed bulk fetch from being
+    # retried on every single request.
+    if (now - _subnet_identity_bulk_ts) > 60:
+        try:
+            _refresh_all_subnet_identities()
+        except Exception:
+            pass
+        cached = _subnet_identity_cache.get(netuid)
+        if cached:
+            return cached["data"]
+    # Bulk refresh didn't cover this netuid (failed, or genuinely has no
+    # identity set on chain) — fall back to a single per-netuid query.
     try:
         sub = get_subtensor()
         result = sub.substrate.query(
@@ -537,7 +586,6 @@ async def subnet_identity(netuid: int):
             storage_function="SubnetIdentitiesV3",
             params=[netuid]
         )
-
         raw = None
         if result is not None:
             if isinstance(result, dict):
@@ -546,17 +594,10 @@ async def subnet_identity(netuid: int):
                 raw = result.value
             elif hasattr(result, 'serialize'):
                 raw = result.serialize()
-
-        if raw is None:
-            data = {"ok": True, "netuid": netuid, "logo_url": None, "name": None}
-        else:
-            logo_url = decode_field(raw.get("logo_url") or raw.get("image_url") or raw.get("icon_url"))
-            name = decode_field(raw.get("subnet_name") or raw.get("name") or raw.get("subnetName"))
-            data = {"ok": True, "netuid": netuid, "logo_url": logo_url, "name": name}
-
+        logo_url, name = _decode_identity_raw(raw)
+        data = {"ok": True, "netuid": netuid, "logo_url": logo_url, "name": name}
         _subnet_identity_cache[netuid] = {"ts": now, "data": data}
         return data
-
     except Exception as e:
         # Transient failure (e.g. rate limit) — serve stale cache if we have
         # it rather than a blank result the frontend can't do anything with.
